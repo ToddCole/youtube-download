@@ -43,8 +43,8 @@ function displayVideoInfo(info) {
 
 function updateFormatUI() {
   const format = document.querySelector('input[name="format"]:checked').value;
-  document.getElementById("quality-wrapper").style.display =
-    format === "mp4" ? "flex" : "none";
+  const show = format === "mp4" || format === "split";
+  document.getElementById("quality-wrapper").style.display = show ? "flex" : "none";
 }
 
 async function startDownload() {
@@ -90,15 +90,19 @@ function trackProgress(job_id, btn) {
 
     if (data.status === "downloading") {
       const pct = data.percent || 0;
+      const phaseLabel = data.phase ? ` · ${data.phase}` : "";
       const label = data.speed
-        ? `${pct.toFixed(1)}%  ·  ${data.speed}  ·  ETA ${data.eta}`
-        : `${pct.toFixed(1)}%`;
+        ? `${pct.toFixed(1)}%${phaseLabel}  ·  ${data.speed}  ·  ETA ${data.eta}`
+        : `${pct.toFixed(1)}%${phaseLabel}`;
       setProgress(pct, label);
     } else if (data.status === "processing") {
-      setProgress(100, "Processing…");
+      setProgress(100, data.phase ? `Processing ${data.phase}…` : "Processing…");
     } else if (data.status === "done") {
       setProgress(100, "");
-      showStatusMessage("done", `Saved to ~/Downloads/youtube/${data.filename}`);
+      const msg = data.filename2
+        ? `Saved to ~/Downloads/youtube/\n  ${data.filename}\n  ${data.filename2}`
+        : `Saved to ~/Downloads/youtube/${data.filename}`;
+      showStatusMessage("done", msg);
       source.close();
       btn.disabled = false;
     } else if (data.status === "error") {

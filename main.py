@@ -38,36 +38,103 @@ def make_progress_hook(job_id: str):
     return hook
 
 
+def make_split_hook(job_id: str, phase: str, offset: float):
+    def hook(d):
+        if d["status"] == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            downloaded = d.get("downloaded_bytes", 0)
+            pct = round(offset + (downloaded / total * 50), 1) if total else offset
+            jobs[job_id].update(
+                {
+                    "status": "downloading",
+                    "percent": pct,
+                    "phase": phase,
+                    "speed": d.get("_speed_str", "").strip(),
+                    "eta": d.get("_eta_str", "").strip(),
+                }
+            )
+        elif d["status"] == "finished":
+            jobs[job_id].update({"status": "processing", "percent": offset + 50})
+
+    return hook
+
+
 def run_download(job_id: str, url: str, format_type: str, quality: str):
     try:
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-        ydl_opts = {
+        base_opts = {
             "outtmpl": str(OUTPUT_DIR / "%(title)s.%(ext)s"),
-            "progress_hooks": [make_progress_hook(job_id)],
             "quiet": True,
             "no_warnings": True,
         }
 
-        if format_type == "mp3":
-            ydl_opts["format"] = "bestaudio/best"
-            ydl_opts["postprocessors"] = [
+        if format_type == "split":
+            video_fmt = (
+                f"bestvideo[height<={quality}][ext=mp4]/bestvideo[height<={quality}]"
+                if quality and quality != "best"
+                else "bestvideo[ext=mp4]/bestvideo"
+            )
+            video_opts = {
+                **base_opts,
+                "format": video_fmt,
+                "progress_hooks": [make_split_hook(job_id, "video", 0)],
+                "postprocessors": [{"key": "FFmpegVideoRemuxer", "preferedformat": "mp4"}],
+            }
+            with yt_dlp.YoutubeDL(video_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                video_filename = str(Path(ydl.prepare_filename(info)).with_suffix(".mp4"))
+
+            audio_opts = {
+                **base_opts,
+                "format": "bestaudio/best",
+                "progress_hooks": [make_split_hook(job_id, "audio", 50)],
+                "postprocessors": [
+                    {
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3",
+                        "preferredquality": "192",
+                    }
+                ],
+            }
+            with yt_dlp.YoutubeDL(audio_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                audio_filename = str(Path(ydl.prepare_filename(info)).with_suffix(".mp3"))
+
+            jobs[job_id].update(
                 {
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "192",
+                    "status": "done",
+                    "filename": Path(video_filename).name,
+                    "filename2": Path(audio_filename).name,
                 }
-            ]
+            )
+            return
+
+        if format_type == "mp3":
+            ydl_opts = {
+                **base_opts,
+                "format": "bestaudio/best",
+                "progress_hooks": [make_progress_hook(job_id)],
+                "postprocessors": [
+                    {
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3",
+                        "preferredquality": "192",
+                    }
+                ],
+            }
         else:
-            if quality and quality != "best":
-                ydl_opts["format"] = (
-                    f"bestvideo[height<={quality}]+bestaudio"
-                    f"/best[height<={quality}]"
-                    f"/best"
-                )
-            else:
-                ydl_opts["format"] = "bestvideo+bestaudio/best"
-            ydl_opts["merge_output_format"] = "mp4"
+            fmt = (
+                f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"
+                if quality and quality != "best"
+                else "bestvideo+bestaudio/best"
+            )
+            ydl_opts = {
+                **base_opts,
+                "format": fmt,
+                "progress_hooks": [make_progress_hook(job_id)],
+                "merge_output_format": "mp4",
+            }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -75,12 +142,7 @@ def run_download(job_id: str, url: str, format_type: str, quality: str):
             if format_type == "mp3":
                 filename = str(Path(filename).with_suffix(".mp3"))
 
-        jobs[job_id].update(
-            {
-                "status": "done",
-                "filename": Path(filename).name,
-            }
-        )
+        jobs[job_id].update({"status": "done", "filename": Path(filename).name})
     except Exception as e:
         jobs[job_id].update({"status": "error", "error": str(e)})
 

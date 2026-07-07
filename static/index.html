@@ -61,6 +61,14 @@
             <input type="radio" name="format" value="split" onchange="updateFormatUI()" />
             <span class="format-pill">Split (Video + Audio)</span>
           </label>
+          <label class="format-option">
+            <input type="radio" name="format" value="transcript" id="format-transcript"
+                   onchange="updateFormatUI()" />
+            <span class="format-pill">Transcript</span>
+          </label>
+          <div id="lang-wrapper" class="quality-wrapper" style="display:none">
+            <select id="lang-select" class="quality-select"></select>
+          </div>
           <div id="quality-wrapper" class="quality-wrapper">
             <select id="quality-select" class="quality-select"></select>
           </div>

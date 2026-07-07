@@ -1,11 +1,11 @@
 import asyncio
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 from uuid import uuid4
 
 import yt_dlp
-from fastapi import BackgroundTasks, FastAPI
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -59,15 +59,49 @@ def make_split_hook(job_id: str, phase: str, offset: float):
     return hook
 
 
-def run_download(job_id: str, url: str, format_type: str, quality: str):
+def run_download(job_id: str, url: str, format_type: str, quality: str, lang: str = "en"):
     try:
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
         base_opts = {
-            "outtmpl": str(OUTPUT_DIR / "%(title)s.%(ext)s"),
+            "outtmpl": str(OUTPUT_DIR / "%(title)s [%(id)s].%(ext)s"),
             "quiet": True,
             "no_warnings": True,
         }
+
+        if format_type == "transcript":
+            jobs[job_id].update(
+                {"status": "downloading", "percent": 50, "phase": "transcript"}
+            )
+            ydl_opts = {
+                **base_opts,
+                "skip_download": True,
+                "writesubtitles": True,
+                "writeautomaticsub": True,
+                "subtitleslangs": [lang],
+                "subtitlesformat": "srt/best",
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                base = Path(ydl.prepare_filename(info)).stem
+            transcript_prefix = f"{base}.{lang}."
+            matches = sorted(
+                path
+                for path in OUTPUT_DIR.iterdir()
+                if path.is_file() and path.name.startswith(transcript_prefix)
+            )
+            subtitle_path = next(
+                (path for path in matches if path.suffix == ".srt"),
+                matches[0] if matches else None,
+            )
+            if subtitle_path is None or not subtitle_path.exists():
+                raise FileNotFoundError(
+                    f"No transcript was downloaded for language '{lang}'."
+                )
+            jobs[job_id].update(
+                {"status": "done", "percent": 100, "filename": subtitle_path.name}
+            )
+            return
 
         if format_type == "split":
             video_fmt = (
@@ -149,8 +183,11 @@ def run_download(job_id: str, url: str, format_type: str, quality: str):
 
 @app.get("/api/info")
 def get_info(url: str):
-    with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
-        info = ydl.extract_info(url, download=False)
+    try:
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     heights = set()
     for f in info.get("formats", []):
@@ -164,19 +201,25 @@ def get_info(url: str):
     duration = info.get("duration", 0)
     m, s = divmod(int(duration), 60)
 
+    manual_langs = set(info.get("subtitles", {}).keys())
+    auto_langs = set(info.get("automatic_captions", {}).keys())
+    all_langs = sorted(manual_langs | auto_langs, key=lambda x: (x != "en", x))
+
     return {
         "title": info.get("title", "Unknown"),
         "thumbnail": info.get("thumbnail", ""),
         "duration": f"{m}:{s:02d}",
         "uploader": info.get("uploader", ""),
         "qualities": available or [1080, 720, 480, 360],
+        "transcript_langs": all_langs,
     }
 
 
 class DownloadRequest(BaseModel):
     url: str
-    format_type: str
+    format_type: Literal["mp4", "mp3", "split", "transcript"]
     quality: Optional[str] = "720"
+    lang: Optional[str] = "en"
 
 
 @app.post("/api/download")
@@ -184,7 +227,7 @@ def start_download(req: DownloadRequest, background_tasks: BackgroundTasks):
     job_id = str(uuid4())
     jobs[job_id] = {"status": "pending", "percent": 0, "speed": "", "eta": ""}
     background_tasks.add_task(
-        run_download, job_id, req.url, req.format_type, req.quality
+        run_download, job_id, req.url, req.format_type, req.quality, req.lang
     )
     return {"job_id": job_id}
 

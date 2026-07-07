@@ -32,9 +32,36 @@ function displayVideoInfo(info) {
   document.getElementById("vid-duration").textContent = info.duration;
 
   const select = document.getElementById("quality-select");
-  select.innerHTML = info.qualities
-    .map((q) => `<option value="${q}">${q}p</option>`)
-    .join("");
+  select.replaceChildren();
+  info.qualities.forEach((q) => {
+    const option = document.createElement("option");
+    option.value = q;
+    option.textContent = `${q}p`;
+    select.appendChild(option);
+  });
+
+  const langs = info.transcript_langs || [];
+  const langSelect = document.getElementById("lang-select");
+  langSelect.replaceChildren();
+  if (langs.length) {
+    langs.forEach((l) => {
+      const option = document.createElement("option");
+      option.value = l;
+      option.textContent = l;
+      langSelect.appendChild(option);
+    });
+  } else {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No captions";
+    langSelect.appendChild(option);
+  }
+  const transcriptInput = document.getElementById("format-transcript");
+  transcriptInput.disabled = langs.length === 0;
+  transcriptInput.closest("label").style.opacity = langs.length === 0 ? "0.4" : "";
+  if (!langs.length && transcriptInput.checked) {
+    document.querySelector('input[name="format"][value="mp4"]').checked = true;
+  }
 
   document.getElementById("video-card").classList.remove("hidden");
   document.getElementById("download-section").classList.remove("hidden");
@@ -43,8 +70,10 @@ function displayVideoInfo(info) {
 
 function updateFormatUI() {
   const format = document.querySelector('input[name="format"]:checked').value;
-  const show = format === "mp4" || format === "split";
-  document.getElementById("quality-wrapper").style.display = show ? "flex" : "none";
+  document.getElementById("quality-wrapper").style.display =
+    format === "mp4" || format === "split" ? "flex" : "none";
+  document.getElementById("lang-wrapper").style.display =
+    format === "transcript" ? "flex" : "none";
 }
 
 async function startDownload() {
@@ -52,6 +81,7 @@ async function startDownload() {
 
   const format_type = document.querySelector('input[name="format"]:checked').value;
   const quality = document.getElementById("quality-select").value;
+  const lang = document.getElementById("lang-select").value;
   const btn = document.getElementById("download-btn");
 
   btn.disabled = true;
@@ -65,9 +95,11 @@ async function startDownload() {
     const res = await fetch("/api/download", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: currentUrl, format_type, quality }),
+      body: JSON.stringify({ url: currentUrl, format_type, quality, lang }),
     });
-    const { job_id } = await res.json();
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed to start download");
+    const { job_id } = data;
     trackProgress(job_id, btn);
   } catch (e) {
     showStatusMessage("error", e.message);

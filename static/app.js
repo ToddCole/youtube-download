@@ -57,9 +57,12 @@ function displayVideoInfo(info) {
     langSelect.appendChild(option);
   }
   const transcriptInput = document.getElementById("format-transcript");
-  transcriptInput.disabled = langs.length === 0;
-  transcriptInput.closest("label").style.opacity = langs.length === 0 ? "0.4" : "";
-  if (!langs.length && transcriptInput.checked) {
+  const mfoPackInput = document.getElementById("format-mfo-pack");
+  [transcriptInput, mfoPackInput].forEach((input) => {
+    input.disabled = langs.length === 0;
+    input.closest("label").style.opacity = langs.length === 0 ? "0.4" : "";
+  });
+  if (!langs.length && (transcriptInput.checked || mfoPackInput.checked)) {
     document.querySelector('input[name="format"][value="mp4"]').checked = true;
   }
 
@@ -73,7 +76,7 @@ function updateFormatUI() {
   document.getElementById("quality-wrapper").style.display =
     format === "mp4" || format === "split" ? "flex" : "none";
   document.getElementById("lang-wrapper").style.display =
-    format === "transcript" ? "flex" : "none";
+    format === "transcript" || format === "mfo_pack" ? "flex" : "none";
 }
 
 async function startDownload() {
@@ -131,9 +134,10 @@ function trackProgress(job_id, btn) {
       setProgress(100, data.phase ? `Processing ${data.phase}…` : "Processing…");
     } else if (data.status === "done") {
       setProgress(100, "");
-      const msg = data.filename2
-        ? `Saved to ~/Downloads/youtube/\n  ${data.filename}\n  ${data.filename2}`
-        : `Saved to ~/Downloads/youtube/${data.filename}`;
+      const filenames = [data.filename, data.filename2, data.filename3].filter(Boolean);
+      const msg = filenames.length > 1
+        ? `Saved to ~/Downloads/youtube/\n  ${filenames.join("\n  ")}`
+        : `Saved to ~/Downloads/youtube/${filenames[0]}`;
       showStatusMessage("done", msg);
       source.close();
       btn.disabled = false;

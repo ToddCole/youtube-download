@@ -1,5 +1,7 @@
 import asyncio
 import json
+import re
+from html import unescape
 from pathlib import Path
 from typing import Literal, Optional
 from uuid import uuid4
@@ -16,6 +18,102 @@ jobs: dict = {}
 
 STATIC_DIR = Path(__file__).parent / "static"
 OUTPUT_DIR = Path.home() / "Downloads" / "youtube"
+
+
+def find_downloaded_subtitle(output_dir: Path, base: str, lang: str) -> Path:
+    transcript_prefix = f"{base}.{lang}."
+    matches = sorted(
+        path
+        for path in output_dir.iterdir()
+        if path.is_file() and path.name.startswith(transcript_prefix)
+    )
+    subtitle_path = next(
+        (path for path in matches if path.suffix == ".srt"),
+        matches[0] if matches else None,
+    )
+    if subtitle_path is None or not subtitle_path.exists():
+        raise FileNotFoundError(f"No transcript was downloaded for language '{lang}'.")
+    return subtitle_path
+
+
+def clean_caption_text(text: str) -> str:
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\{\\.*?\}", "", text)
+    return re.sub(r"\s+", " ", unescape(text)).strip()
+
+
+def srt_to_plain_text(srt_text: str) -> str:
+    entries = []
+    seen = set()
+    blocks = re.split(r"\n\s*\n", srt_text.replace("\r\n", "\n").replace("\r", "\n"))
+
+    for block in blocks:
+        caption_lines = []
+        for line in block.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.isdigit():
+                continue
+            if "-->" in stripped:
+                continue
+            if stripped.upper() == "WEBVTT":
+                continue
+            caption_lines.append(stripped)
+
+        caption = clean_caption_text(" ".join(caption_lines))
+        normalized = caption.lower()
+        if caption and normalized not in seen:
+            seen.add(normalized)
+            entries.append(caption)
+
+    return "\n".join(entries)
+
+
+def format_duration(seconds: Optional[int]) -> str:
+    if seconds is None:
+        return ""
+    seconds = int(seconds)
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def format_upload_date(raw_date: Optional[str]) -> str:
+    if not raw_date:
+        return ""
+    if len(raw_date) == 8 and raw_date.isdigit():
+        return f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}"
+    return raw_date
+
+
+def build_mfo_markdown(info: dict, url: str, transcript: str) -> str:
+    title = info.get("title") or "Unknown"
+    channel = info.get("channel") or info.get("uploader") or ""
+    description = (info.get("description") or "").strip()
+    video_url = info.get("webpage_url") or url
+
+    return "\n".join(
+        [
+            f"# {title}",
+            "",
+            "## Source Metadata",
+            f"- Video URL: {video_url}",
+            f"- Title: {title}",
+            f"- Channel: {channel}",
+            f"- Upload Date: {format_upload_date(info.get('upload_date'))}",
+            f"- Duration: {format_duration(info.get('duration'))}",
+            f"- Description: {description}",
+            f"- Video ID: {info.get('id') or ''}",
+            "",
+            "## Transcript",
+            "",
+            transcript,
+            "",
+        ]
+    )
 
 
 def make_progress_hook(job_id: str):
@@ -68,6 +166,44 @@ def run_download(job_id: str, url: str, format_type: str, quality: str, lang: st
             "quiet": True,
             "no_warnings": True,
         }
+
+        if format_type == "mfo_pack":
+            jobs[job_id].update(
+                {"status": "downloading", "percent": 50, "phase": "mfo_pack"}
+            )
+            ydl_opts = {
+                **base_opts,
+                "skip_download": True,
+                "writesubtitles": True,
+                "writeautomaticsub": True,
+                "subtitleslangs": [lang],
+                "subtitlesformat": "srt/best",
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                base = Path(ydl.prepare_filename(info)).stem
+
+            subtitle_path = find_downloaded_subtitle(OUTPUT_DIR, base, lang)
+            srt_text = subtitle_path.read_text(encoding="utf-8", errors="replace")
+            transcript = srt_to_plain_text(srt_text)
+
+            transcript_path = OUTPUT_DIR / f"{base}.transcript.txt"
+            markdown_path = OUTPUT_DIR / f"{base}.mfo-pack.md"
+            transcript_path.write_text(transcript + "\n", encoding="utf-8")
+            markdown_path.write_text(
+                build_mfo_markdown(info, url, transcript), encoding="utf-8"
+            )
+
+            jobs[job_id].update(
+                {
+                    "status": "done",
+                    "percent": 100,
+                    "filename": subtitle_path.name,
+                    "filename2": transcript_path.name,
+                    "filename3": markdown_path.name,
+                }
+            )
+            return
 
         if format_type == "transcript":
             jobs[job_id].update(
@@ -217,7 +353,7 @@ def get_info(url: str):
 
 class DownloadRequest(BaseModel):
     url: str
-    format_type: Literal["mp4", "mp3", "split", "transcript"]
+    format_type: Literal["mp4", "mp3", "split", "transcript", "mfo_pack"]
     quality: Optional[str] = "720"
     lang: Optional[str] = "en"
 
@@ -263,4 +399,4 @@ def index():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8090)

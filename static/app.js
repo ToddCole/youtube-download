@@ -15,7 +15,7 @@ async function fetchInfo() {
   try {
     const res = await fetch(`/api/info?url=${encodeURIComponent(url)}`);
     const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Failed to fetch video info");
+    if (!res.ok) throw new Error(getErrorMessage(data, "Failed to fetch video info"));
     currentUrl = url;
     displayVideoInfo(data);
   } catch (e) {
@@ -101,13 +101,22 @@ async function startDownload() {
       body: JSON.stringify({ url: currentUrl, format_type, quality, lang }),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Failed to start download");
+    if (!res.ok) throw new Error(getErrorMessage(data, "Failed to start download"));
     const { job_id } = data;
     trackProgress(job_id, btn);
   } catch (e) {
     showStatusMessage("error", e.message);
     btn.disabled = false;
   }
+}
+
+function getErrorMessage(data, fallback) {
+  if (!data || !data.detail) return fallback;
+  if (typeof data.detail === "string") return data.detail;
+  if (Array.isArray(data.detail)) {
+    return data.detail.map((item) => item.msg || JSON.stringify(item)).join("\n");
+  }
+  return JSON.stringify(data.detail);
 }
 
 function trackProgress(job_id, btn) {

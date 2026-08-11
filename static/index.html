@@ -92,6 +92,91 @@
         <div id="progress-text" class="progress-text">Starting…</div>
         <div id="status-message" class="status-message hidden"></div>
       </section>
+
+      <section id="editorial-desk" class="editorial-desk">
+        <div class="desk-header">
+          <div>
+            <p class="desk-kicker">MFO Publishing</p>
+            <h1>Editorial Desk</h1>
+          </div>
+          <button class="btn btn-secondary" onclick="refreshEditorialResults()">Refresh Results</button>
+        </div>
+
+        <div class="desk-controls">
+          <button class="btn btn-primary" onclick="runEditorialScan('creator')">Run YouTube Intelligence Scanner</button>
+          <button class="btn btn-primary" onclick="runEditorialScan('news')">Run News Scanner</button>
+          <button class="btn btn-primary" onclick="runEditorialScan('research')">Run Research Scanner</button>
+          <button class="btn btn-download" onclick="runEditorialScan('both')">Run All Scanners</button>
+        </div>
+
+        <div id="editorial-error" class="error-banner hidden"></div>
+
+        <div class="scanner-grid">
+          <article id="creator-status-card" class="scanner-card"></article>
+          <article id="news-status-card" class="scanner-card"></article>
+          <article id="research-status-card" class="scanner-card"></article>
+        </div>
+
+        <div class="desk-panel">
+          <div class="panel-heading">
+            <div>
+              <h2>Agent Review</h2>
+              <p>Prepare candidates for manual agent annotation, then import the JSON response.</p>
+            </div>
+            <button class="btn btn-secondary" onclick="prepareAgentReview()">Prepare Agent Review</button>
+          </div>
+          <div class="manual-story-row">
+            <input id="manual-story-input" class="url-input" placeholder="Add story URL or pasted idea the scanners missed" />
+            <button class="btn btn-secondary" onclick="addManualStory()">Add Story</button>
+          </div>
+          <div id="manual-story-list" class="manual-story-list"></div>
+          <div id="packet-actions" class="packet-actions hidden">
+            <button class="btn btn-secondary" onclick="copyReviewPacket()">Copy Packet</button>
+            <button class="btn btn-secondary" onclick="downloadReviewPacket('md')">Download Markdown</button>
+            <button class="btn btn-secondary" onclick="downloadReviewPacket('json')">Download JSON</button>
+            <span id="packet-summary" class="small-muted"></span>
+          </div>
+
+          <div class="import-grid">
+            <textarea id="agent-response-input" class="agent-response-input" placeholder="Paste supervisor JSON response here"></textarea>
+            <div class="import-actions">
+              <input id="agent-response-file" type="file" accept="application/json,.json" onchange="loadAgentResponseFile(event)" />
+              <button class="btn btn-primary" onclick="importAgentReview()">Import Agent Review</button>
+              <div id="agent-import-error" class="error-banner hidden"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="desk-panel">
+          <div class="panel-heading">
+            <div>
+              <h2>Recommended Slate</h2>
+              <p>Preferred four to six stories from the imported agent review.</p>
+            </div>
+          </div>
+          <div id="recommendations-list" class="recommendations-list empty-state">No agent review imported.</div>
+        </div>
+
+        <div class="desk-panel">
+          <div class="panel-heading">
+            <div>
+              <h2>Reviewed Candidates</h2>
+              <p>All supplied candidates stay visible, with raw scanner rank and agent judgement.</p>
+            </div>
+          </div>
+          <div class="lead-tabs">
+            <button class="tab-button active" onclick="setLeadTab('creator')">Creator</button>
+            <button class="tab-button" onclick="setLeadTab('news')">News</button>
+            <button class="tab-button" onclick="setLeadTab('research')">Research</button>
+            <button class="tab-button" onclick="setLeadTab('manual')">Manual</button>
+          </div>
+          <div id="lead-list" class="lead-list"></div>
+          <details class="rejected-panel">
+            <summary>Show excluded</summary>
+            <div id="excluded-list" class="rejected-list"></div>
+          </details>
+        </div>
+      </section>
     </main>
   </div>
 

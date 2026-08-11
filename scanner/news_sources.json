@@ -1,0 +1,39 @@
+{
+  "feeds": [
+    {
+      "name": "HYROX News",
+      "url": "https://hyrox.com/feed/",
+      "type": "official"
+    },
+    {
+      "name": "Stan Media Releases",
+      "url": "https://www.stan.news/feed",
+      "type": "publicity"
+    },
+    {
+      "name": "ScienceDaily Fitness",
+      "url": "https://www.sciencedaily.com/rss/health_medicine/fitness.xml",
+      "type": "research_media"
+    },
+    {
+      "name": "ScienceDaily Nutrition",
+      "url": "https://www.sciencedaily.com/rss/health_medicine/nutrition.xml",
+      "type": "research_media"
+    },
+    {
+      "name": "ScienceDaily Sports Medicine",
+      "url": "https://www.sciencedaily.com/rss/health_medicine/sports_medicine.xml",
+      "type": "research_media"
+    },
+    {
+      "name": "ScienceDaily Diet And Weight Loss",
+      "url": "https://www.sciencedaily.com/rss/health_medicine/diet_and_weight_loss.xml",
+      "type": "research_media"
+    },
+    {
+      "name": "ScienceDaily Dietary Supplements",
+      "url": "https://www.sciencedaily.com/rss/health_medicine/dietary_supplements.xml",
+      "type": "research_media"
+    }
+  ]
+}

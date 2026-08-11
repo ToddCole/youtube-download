@@ -1,0 +1,92 @@
+{
+  "window_days": 7,
+  "overlap_days": 3,
+  "thresholds": {
+    "viable": 65,
+    "hold": 50
+  },
+  "topic_groups": [
+    {
+      "name": "Resistance training, strength and hypertrophy",
+      "query": "(resistance training OR strength training OR hypertrophy OR muscle strength) AND (trial OR systematic review OR meta-analysis OR cohort)"
+    },
+    {
+      "name": "Sarcopenia, healthy ageing and muscle retention",
+      "query": "(sarcopenia OR healthy ageing OR aging OR muscle retention OR muscle mass) AND (exercise OR resistance training OR protein)"
+    },
+    {
+      "name": "Testosterone, erectile health and men's health",
+      "query": "(testosterone OR erectile dysfunction OR men's health OR male health) AND (exercise OR obesity OR resistance training OR cardiovascular)"
+    },
+    {
+      "name": "Weight loss, obesity, GLP-1 drugs and lean-mass retention",
+      "query": "(weight loss OR obesity OR semaglutide OR tirzepatide OR GLP-1 OR lean mass) AND (exercise OR resistance training OR muscle)"
+    },
+    {
+      "name": "Protein, creatine and common sports supplements",
+      "query": "(protein OR creatine OR sports supplement OR whey OR caffeine) AND (exercise OR resistance training OR muscle OR performance)"
+    },
+    {
+      "name": "Running, VO2 max, HIIT and cardiovascular fitness",
+      "query": "(running OR VO2 max OR cardiorespiratory fitness OR HIIT OR interval training) AND (trial OR cohort OR systematic review)"
+    },
+    {
+      "name": "Sleep, recovery and fatigue",
+      "query": "(sleep OR recovery OR fatigue) AND (exercise OR resistance training OR athletes OR physical activity)"
+    },
+    {
+      "name": "Back, knee, shoulder, tendon and sports injuries",
+      "query": "(back pain OR knee injury OR shoulder injury OR tendinopathy OR sports injury) AND (exercise OR rehabilitation OR training)"
+    },
+    {
+      "name": "Diabetes, heart health, longevity and physical activity",
+      "query": "(diabetes OR cardiovascular health OR heart health OR longevity OR mortality) AND (physical activity OR exercise OR fitness)"
+    },
+    {
+      "name": "Training frequency, volume, intensity and exercise selection",
+      "query": "(training frequency OR training volume OR exercise intensity OR exercise selection OR sets OR repetitions) AND (resistance training OR strength training)"
+    },
+    {
+      "name": "Strength and conditioning, sports performance and power",
+      "query": "(strength and conditioning OR sports performance OR exercise physiology OR powerlifting OR weightlifting OR sprint performance OR athletic performance) AND (resistance training OR strength training OR power OR velocity OR hypertrophy)"
+    }
+  ],
+  "journal_boosts": [
+    {
+      "name": "Journal of Strength and Conditioning Research",
+      "mfo_relevance_boost": 2
+    },
+    {
+      "name": "Strength and Conditioning Journal",
+      "mfo_relevance_boost": 2
+    },
+    {
+      "name": "Sports Medicine",
+      "mfo_relevance_boost": 1
+    },
+    {
+      "name": "Medicine & Science in Sports & Exercise",
+      "mfo_relevance_boost": 1
+    },
+    {
+      "name": "European Journal of Applied Physiology",
+      "mfo_relevance_boost": 1
+    },
+    {
+      "name": "International Journal of Sports Physiology and Performance",
+      "mfo_relevance_boost": 1
+    }
+  ],
+  "penalties": {
+    "animal_only": 25,
+    "preprint": 20,
+    "editorial_or_commentary": 25,
+    "missing_abstract": 20,
+    "extremely_small_sample": 15,
+    "surrogate_outcome": 10,
+    "observational_causal_claim": 15,
+    "commercial_conflict": 10,
+    "archive_overlap": 20,
+    "press_release_hype": 15
+  }
+}

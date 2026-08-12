@@ -144,6 +144,25 @@ Phase 1 uses a manual agent adapter. Click `Prepare Agent Review`, copy or downl
 
 Imported reviews render a recommended slate at the top, but all supplied candidates remain visible under Creator, News, Research and Manual tabs. The supervisor response must assess every supplied candidate as `Strong`, `Possible` or `Weak`, with an MFO angle, evidence risk and archive-overlap warning. Local `Commission`, `Hold` and `Reject` decisions are saved in `scanner.db` and survive refreshes and app restarts.
 
+Commissioning is an editorial decision only. Commissioned stories move into the local Production Queue, where an editor can:
+
+- prepare a writing packet for a manual writing agent
+- import a completed article JSON payload
+- create a WordPress draft
+- open the created draft in WordPress
+
+The article import must include `headline`, `slug`, `excerpt`, `article_html`, `seo_title`, `meta_description`, `focus_keyphrase`, `tags`, `source_attribution`, `facts_checked`, `risks_disclosures`, `internal_links` and `embed_media_notes`. Missing fields or invalid JSON block the import.
+
+WordPress draft creation is draft-only and requires local environment variables:
+
+```bash
+export MFO_WP_BASE_URL="https://mensfitnessonline.com.au"
+export MFO_WP_USERNAME="your-wordpress-username"
+export MFO_WP_APP_PASSWORD="your-wordpress-application-password"
+```
+
+Draft creation uses the WordPress REST API with Application Password authentication. Tags and the suggested category are resolved or created before the post is created. Yoast title, meta description and focus keyphrase are sent only when WordPress exposes the relevant registered REST meta fields; otherwise the queue marks them as manual copy required. The app never publishes automatically.
+
 ## Scheduling Twice Daily On macOS
 
 The included `com.mfo.youtube-scanner.plist` runs at 8:00 and 20:00 local time.

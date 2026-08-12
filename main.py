@@ -1,5 +1,7 @@
 import asyncio
+import base64
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -9,6 +11,9 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 from uuid import uuid4
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 import yt_dlp
 from fastapi import BackgroundTasks, FastAPI, HTTPException
@@ -33,6 +38,13 @@ STALE_HOURS = 14
 VERY_STALE_HOURS = 24
 
 editorial_jobs: dict = {}
+
+
+class ClosingSQLiteConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        result = super().__exit__(exc_type, exc_value, traceback)
+        self.close()
+        return result
 
 
 def find_downloaded_subtitle(output_dir: Path, base: str, lang: str) -> Path:
@@ -387,6 +399,17 @@ class ReviewPacketRequest(BaseModel):
     manual_stories: Optional[list[dict[str, Any]]] = None
 
 
+class WritingPacketRequest(BaseModel):
+    lead: Optional[dict[str, Any]] = None
+    assessment: Optional[dict[str, Any]] = None
+
+
+class ArticleImportRequest(BaseModel):
+    article: Any
+    lead: Optional[dict[str, Any]] = None
+    assessment: Optional[dict[str, Any]] = None
+
+
 @app.post("/api/download")
 def start_download(req: DownloadRequest, background_tasks: BackgroundTasks):
     job_id = str(uuid4())
@@ -463,12 +486,50 @@ def ensure_editorial_tables(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS production_queue (
+            lead_id TEXT PRIMARY KEY,
+            source_lead_json TEXT,
+            assessment_json TEXT,
+            status TEXT NOT NULL CHECK(status IN (
+                'commissioned',
+                'writing_packet_prepared',
+                'article_imported',
+                'wp_draft_created',
+                'wp_draft_failed'
+            )),
+            writing_packet_json TEXT,
+            writing_packet_markdown TEXT,
+            article_json TEXT,
+            article_html TEXT,
+            headline TEXT,
+            slug TEXT,
+            excerpt TEXT,
+            seo_title TEXT,
+            meta_description TEXT,
+            focus_keyphrase TEXT,
+            related_keyphrases_json TEXT,
+            tags_json TEXT,
+            category_suggestion TEXT,
+            internal_link_notes_json TEXT,
+            image_video_notes_json TEXT,
+            wp_draft_id INTEGER,
+            wp_draft_url TEXT,
+            wp_edit_url TEXT,
+            wp_yoast_status TEXT,
+            wp_error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
 
 
 def editorial_conn() -> sqlite3.Connection:
     SCANNER_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(SCANNER_DB)
+    conn = sqlite3.connect(SCANNER_DB, factory=ClosingSQLiteConnection)
     conn.row_factory = sqlite3.Row
     ensure_editorial_tables(conn)
     return conn
@@ -580,6 +641,364 @@ def get_decisions() -> dict:
             "SELECT lead_id, decision, note, updated_at FROM editorial_decisions"
         ).fetchall()
     return {row["lead_id"]: dict(row) for row in rows}
+
+
+def json_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def json_loads_maybe(value: str | None, default: Any = None) -> Any:
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return default
+
+
+def list_production_queue() -> dict[str, dict[str, Any]]:
+    if not SCANNER_DB.exists():
+        return {}
+    with editorial_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM production_queue
+            ORDER BY updated_at DESC
+            """
+        ).fetchall()
+    queue: dict[str, dict[str, Any]] = {}
+    json_fields = {
+        "source_lead_json": "source_lead",
+        "assessment_json": "assessment",
+        "writing_packet_json": "writing_packet",
+        "article_json": "article",
+        "related_keyphrases_json": "related_keyphrases",
+        "tags_json": "tags",
+        "internal_link_notes_json": "internal_link_notes",
+        "image_video_notes_json": "image_video_notes",
+    }
+    list_json_fields = {
+        "related_keyphrases_json",
+        "tags_json",
+        "internal_link_notes_json",
+        "image_video_notes_json",
+    }
+    for row in rows:
+        item = dict(row)
+        for db_field, api_field in json_fields.items():
+            item[api_field] = json_loads_maybe(
+                item.pop(db_field, None),
+                [] if db_field in list_json_fields else None,
+            )
+        queue[item["lead_id"]] = item
+    return queue
+
+
+def upsert_production_queue_item(
+    conn: sqlite3.Connection,
+    lead_id: str,
+    status: str = "commissioned",
+    lead: dict[str, Any] | None = None,
+    assessment: dict[str, Any] | None = None,
+) -> None:
+    now = utc_iso()
+    conn.execute(
+        """
+        INSERT INTO production_queue
+        (lead_id, source_lead_json, assessment_json, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(lead_id) DO UPDATE SET
+            source_lead_json = COALESCE(excluded.source_lead_json, production_queue.source_lead_json),
+            assessment_json = COALESCE(excluded.assessment_json, production_queue.assessment_json),
+            status = CASE
+                WHEN production_queue.status IN ('writing_packet_prepared', 'article_imported', 'wp_draft_created', 'wp_draft_failed')
+                THEN production_queue.status
+                ELSE excluded.status
+            END,
+            updated_at = excluded.updated_at
+        """,
+        (
+            lead_id,
+            json_dumps(lead) if lead else None,
+            json_dumps(assessment) if assessment else None,
+            status,
+            now,
+            now,
+        ),
+    )
+
+
+ARTICLE_REQUIRED_FIELDS = {
+    "headline",
+    "slug",
+    "excerpt",
+    "article_html",
+    "seo_title",
+    "meta_description",
+    "focus_keyphrase",
+    "tags",
+    "source_attribution",
+    "facts_checked",
+    "risks_disclosures",
+    "internal_links",
+    "embed_media_notes",
+}
+
+
+ARTICLE_SCHEMA = {
+    "type": "object",
+    "required": sorted(ARTICLE_REQUIRED_FIELDS),
+    "properties": {
+        "headline": {"type": "string"},
+        "slug": {"type": "string"},
+        "excerpt": {"type": "string"},
+        "article_html": {"type": "string"},
+        "seo_title": {"type": "string"},
+        "meta_description": {"type": "string"},
+        "focus_keyphrase": {"type": "string"},
+        "related_keyphrases": {"type": "array", "items": {"type": "string"}},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "category_suggestion": {"type": "string"},
+        "source_attribution": {"type": "array"},
+        "facts_checked": {"type": "array"},
+        "risks_disclosures": {"type": "array"},
+        "internal_links": {"type": "array"},
+        "embed_media_notes": {"type": "array"},
+    },
+}
+
+
+def validate_article_payload(payload: Any) -> tuple[bool, list[str]]:
+    errors: list[str] = []
+    if not isinstance(payload, dict):
+        return False, ["Article import must be a JSON object."]
+    missing = sorted(ARTICLE_REQUIRED_FIELDS - set(payload))
+    if missing:
+        errors.append(f"Article is missing required fields: {', '.join(missing)}.")
+    for field in ["headline", "slug", "excerpt", "article_html", "seo_title", "meta_description", "focus_keyphrase"]:
+        if field in payload and (not isinstance(payload[field], str) or not payload[field].strip()):
+            errors.append(f"{field} must be a non-empty string.")
+    if "slug" in payload and isinstance(payload["slug"], str) and not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", payload["slug"]):
+        errors.append("slug must use lowercase letters, numbers and hyphens only.")
+    for field in ["tags", "source_attribution", "facts_checked", "risks_disclosures", "internal_links", "embed_media_notes"]:
+        if field in payload and not isinstance(payload[field], list):
+            errors.append(f"{field} must be a list.")
+    if isinstance(payload.get("tags"), list):
+        clean_tags = [tag for tag in payload["tags"] if isinstance(tag, str) and tag.strip()]
+        if not clean_tags:
+            errors.append("tags must contain at least one non-empty string.")
+    if "related_keyphrases" in payload and not isinstance(payload["related_keyphrases"], list):
+        errors.append("related_keyphrases must be a list when supplied.")
+    if "category_suggestion" in payload and payload["category_suggestion"] is not None and not isinstance(payload["category_suggestion"], str):
+        errors.append("category_suggestion must be a string when supplied.")
+    return not errors, errors
+
+
+def render_writing_packet_markdown(packet: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            "# MFO Writing Packet",
+            "",
+            f"Generated: {packet['generated_at']}",
+            f"Lead ID: {packet['lead_id']}",
+            "",
+            "## Editorial Rules",
+            "",
+            packet.get("editorial_rules", ""),
+            "",
+            "## Required Article JSON Schema",
+            "",
+            "```json",
+            json.dumps(packet.get("required_article_schema", {}), indent=2),
+            "```",
+            "",
+            "## Production Brief",
+            "",
+            "```json",
+            json.dumps(
+                {
+                    "lead": packet.get("lead"),
+                    "agent_assessment": packet.get("agent_assessment"),
+                    "scanner_evidence": packet.get("scanner_evidence"),
+                    "archive_overlap": packet.get("archive_overlap"),
+                    "source_links": packet.get("source_links"),
+                },
+                indent=2,
+            ),
+            "```",
+            "",
+            "Return complete JSON only. Do not invent missing facts.",
+            "",
+        ]
+    )
+
+
+def build_writing_packet(lead_id: str, lead: dict[str, Any] | None, assessment: dict[str, Any] | None) -> dict[str, Any]:
+    mfo_index = load_json_file(SCANNER_DIR / "mfo_index.json", {})
+    source_links = []
+    for key in ["source_url", "url", "video_url", "pubmed_url", "publisher_url"]:
+        value = (lead or {}).get(key)
+        if isinstance(value, str) and value:
+            source_links.append(value)
+    for value in (lead or {}).get("evidence_links", []) if isinstance((lead or {}).get("evidence_links"), list) else []:
+        if isinstance(value, str) and value and value not in source_links:
+            source_links.append(value)
+    packet = {
+        "packet_schema_version": 1,
+        "generated_at": utc_iso(),
+        "lead_id": lead_id,
+        "purpose": "Manual article-writing packet for an MFO commissioned story.",
+        "lead": lead or {"lead_id": lead_id},
+        "agent_assessment": assessment or {},
+        "scanner_evidence": {
+            "lead": lead or {},
+            "facts_to_check": (assessment or {}).get("facts_to_check", []),
+            "evidence_risk": (assessment or {}).get("evidence_risk", ""),
+        },
+        "archive_overlap": (lead or {}).get("archive_overlap") or (assessment or {}).get("archive_overlap_warning") or {},
+        "source_links": source_links,
+        "editorial_rules": (
+            "Write for Australian men 35-65. Use source attribution, practical context, caveats, "
+            "and clear disclosures. Do not invent missing facts; mark gaps in facts_checked or risks_disclosures."
+        ),
+        "archive_overlap_information": {
+            "refreshed_at": mfo_index.get("refreshed_at") or mfo_index.get("generated_at"),
+            "page_count": len(mfo_index.get("pages", [])) if isinstance(mfo_index.get("pages"), list) else None,
+        },
+        "required_article_schema": ARTICLE_SCHEMA,
+    }
+    packet["markdown"] = render_writing_packet_markdown(packet)
+    return packet
+
+
+def wp_config() -> dict[str, str]:
+    cfg = {
+        "base_url": os.getenv("MFO_WP_BASE_URL", "").rstrip("/"),
+        "username": os.getenv("MFO_WP_USERNAME", ""),
+        "app_password": os.getenv("MFO_WP_APP_PASSWORD", ""),
+    }
+    missing = [name for name, value in {
+        "MFO_WP_BASE_URL": cfg["base_url"],
+        "MFO_WP_USERNAME": cfg["username"],
+        "MFO_WP_APP_PASSWORD": cfg["app_password"],
+    }.items() if not value]
+    if missing:
+        raise RuntimeError(f"Missing WordPress environment variables: {', '.join(missing)}.")
+    return cfg
+
+
+def wp_request(method: str, path: str, payload: dict[str, Any] | None = None, query: dict[str, str] | None = None) -> dict[str, Any] | list[Any]:
+    cfg = wp_config()
+    url = f"{cfg['base_url']}{path}"
+    if query:
+        url = f"{url}?{urlencode(query)}"
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    token = base64.b64encode(f"{cfg['username']}:{cfg['app_password']}".encode("utf-8")).decode("ascii")
+    request = Request(
+        url,
+        data=body,
+        method=method,
+        headers={
+            "Authorization": f"Basic {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            text = response.read().decode("utf-8", errors="replace")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace") if exc.fp else str(exc)
+        raise RuntimeError(f"WordPress {method} {path} failed with HTTP {exc.code}: {detail[:500]}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"WordPress request failed: {exc.reason}") from exc
+    return json.loads(text) if text else {}
+
+
+def wp_term_id(taxonomy: str, name: str) -> int | None:
+    name = name.strip()
+    if not name:
+        return None
+    existing = wp_request("GET", f"/wp-json/wp/v2/{taxonomy}", query={"search": name, "per_page": "20"})
+    if isinstance(existing, list):
+        for item in existing:
+            if isinstance(item, dict) and str(item.get("name", "")).lower() == name.lower():
+                return int(item["id"])
+    created = wp_request("POST", f"/wp-json/wp/v2/{taxonomy}", {"name": name})
+    if isinstance(created, dict) and created.get("id"):
+        return int(created["id"])
+    return None
+
+
+def wp_registered_yoast_meta_keys() -> set[str]:
+    try:
+        post_type = wp_request("GET", "/wp-json/wp/v2/types/post", query={"context": "edit"})
+    except RuntimeError:
+        return set()
+    schema = post_type.get("schema", {}) if isinstance(post_type, dict) else {}
+    meta_props = schema.get("properties", {}).get("meta", {}).get("properties", {})
+    return set(meta_props) if isinstance(meta_props, dict) else set()
+
+
+def create_wp_draft_payload(article: dict[str, Any], tag_ids: list[int], category_ids: list[int], yoast_keys: set[str]) -> tuple[dict[str, Any], str]:
+    payload: dict[str, Any] = {
+        "status": "draft",
+        "title": article["headline"],
+        "content": article["article_html"],
+        "excerpt": article["excerpt"],
+        "slug": article["slug"],
+        "tags": tag_ids,
+        "categories": category_ids,
+    }
+    desired_meta = {
+        "_yoast_wpseo_title": article["seo_title"],
+        "_yoast_wpseo_metadesc": article["meta_description"],
+        "_yoast_wpseo_focuskw": article["focus_keyphrase"],
+    }
+    writable_meta = {key: value for key, value in desired_meta.items() if key in yoast_keys}
+    if writable_meta:
+        payload["meta"] = writable_meta
+    yoast_status = "applied" if set(writable_meta) == set(desired_meta) else "manual_copy_required"
+    return payload, yoast_status
+
+
+def create_wordpress_draft(article: dict[str, Any]) -> dict[str, Any]:
+    tag_ids = [
+        term_id for term_id in (wp_term_id("tags", tag) for tag in article.get("tags", []))
+        if term_id is not None
+    ]
+    category_ids: list[int] = []
+    category = str(article.get("category_suggestion") or "").strip()
+    if category:
+        category_id = wp_term_id("categories", category)
+        if category_id is not None:
+            category_ids.append(category_id)
+    payload, yoast_status = create_wp_draft_payload(article, tag_ids, category_ids, wp_registered_yoast_meta_keys())
+    draft = wp_request("POST", "/wp-json/wp/v2/posts", payload)
+    if not isinstance(draft, dict) or not draft.get("id"):
+        raise RuntimeError("WordPress did not return a draft post ID.")
+    cfg = wp_config()
+    draft_id = int(draft["id"])
+    fetched = wp_request("GET", f"/wp-json/wp/v2/posts/{draft_id}", query={"context": "edit"})
+    draft_url = ""
+    if isinstance(fetched, dict):
+        draft_url = str(fetched.get("link") or fetched.get("guid", {}).get("rendered") or "")
+    if not draft_url:
+        draft_url = str(draft.get("link") or "")
+    return {
+        "wp_draft_id": draft_id,
+        "wp_draft_url": draft_url,
+        "wp_edit_url": f"{cfg['base_url']}/wp-admin/post.php?post={draft_id}&action=edit",
+        "wp_yoast_status": yoast_status,
+        "payload": payload,
+    }
+
+
+def require_production_row(conn: sqlite3.Connection, lead_id: str) -> sqlite3.Row:
+    row = conn.execute("SELECT * FROM production_queue WHERE lead_id = ?", (lead_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=400, detail="Commission this lead before using production actions.")
+    return row
 
 
 def run_scanner_job(job_id: str, scanner_type: str) -> None:
@@ -968,6 +1387,7 @@ def get_editorial_results():
         "news": load_json_file(NEWS_JSON, {"scanner_type": "news", "leads": []}),
         "research": load_json_file(RESEARCH_JSON, {"scanner_type": "research", "leads": []}),
         "decisions": get_decisions(),
+        "production_queue": list_production_queue(),
     }
 
 
@@ -1009,6 +1429,8 @@ def save_editorial_decision(req: EditorialDecisionRequest):
             """,
             (req.lead_id, req.decision, req.note or "", now),
         )
+        if req.decision == "commission":
+            upsert_production_queue_item(conn, req.lead_id)
         conn.commit()
     return {"lead_id": req.lead_id, "decision": req.decision, "note": req.note or "", "updated_at": now}
 
@@ -1016,6 +1438,151 @@ def save_editorial_decision(req: EditorialDecisionRequest):
 @app.get("/api/editorial/decisions")
 def list_editorial_decisions():
     return {"decisions": get_decisions()}
+
+
+@app.get("/api/editorial/production-queue")
+def get_production_queue():
+    return {"production_queue": list_production_queue()}
+
+
+@app.post("/api/editorial/production-queue/{lead_id:path}/writing-packet")
+def prepare_writing_packet(lead_id: str, req: Optional[WritingPacketRequest] = None):
+    lead = req.lead if req else None
+    assessment = req.assessment if req else None
+    packet = build_writing_packet(lead_id, lead, assessment)
+    now = utc_iso()
+    with editorial_conn() as conn:
+        require_production_row(conn, lead_id)
+        conn.execute(
+            """
+            UPDATE production_queue
+            SET source_lead_json = COALESCE(?, source_lead_json),
+                assessment_json = COALESCE(?, assessment_json),
+                status = ?,
+                writing_packet_json = ?,
+                writing_packet_markdown = ?,
+                updated_at = ?
+            WHERE lead_id = ?
+            """,
+            (
+                json_dumps(lead) if lead else None,
+                json_dumps(assessment) if assessment else None,
+                "writing_packet_prepared",
+                json_dumps({key: value for key, value in packet.items() if key != "markdown"}),
+                packet["markdown"],
+                now,
+                lead_id,
+            ),
+        )
+        conn.commit()
+    return {"lead_id": lead_id, "status": "writing_packet_prepared", "packet": packet}
+
+
+@app.post("/api/editorial/production-queue/{lead_id:path}/article")
+def import_article(lead_id: str, req: ArticleImportRequest):
+    valid, errors = validate_article_payload(req.article)
+    if not valid:
+        raise HTTPException(status_code=400, detail={"message": "Malformed article JSON.", "errors": errors})
+    article = req.article
+    now = utc_iso()
+    with editorial_conn() as conn:
+        require_production_row(conn, lead_id)
+        conn.execute(
+            """
+            UPDATE production_queue
+            SET source_lead_json = COALESCE(?, source_lead_json),
+                assessment_json = COALESCE(?, assessment_json),
+                status = ?,
+                article_json = ?,
+                article_html = ?,
+                headline = ?,
+                slug = ?,
+                excerpt = ?,
+                seo_title = ?,
+                meta_description = ?,
+                focus_keyphrase = ?,
+                related_keyphrases_json = ?,
+                tags_json = ?,
+                category_suggestion = ?,
+                internal_link_notes_json = ?,
+                image_video_notes_json = ?,
+                wp_error = NULL,
+                updated_at = ?
+            WHERE lead_id = ?
+            """,
+            (
+                json_dumps(req.lead) if req.lead else None,
+                json_dumps(req.assessment) if req.assessment else None,
+                "article_imported",
+                json_dumps(article),
+                article["article_html"],
+                article["headline"],
+                article["slug"],
+                article["excerpt"],
+                article["seo_title"],
+                article["meta_description"],
+                article["focus_keyphrase"],
+                json_dumps(article.get("related_keyphrases", [])),
+                json_dumps(article.get("tags", [])),
+                article.get("category_suggestion", ""),
+                json_dumps(article.get("internal_links", [])),
+                json_dumps(article.get("embed_media_notes", [])),
+                now,
+                lead_id,
+            ),
+        )
+        conn.commit()
+    return {"lead_id": lead_id, "status": "article_imported", "article": article}
+
+
+@app.post("/api/editorial/production-queue/{lead_id:path}/wp-draft")
+def create_wordpress_draft_for_queue_item(lead_id: str):
+    now = utc_iso()
+    with editorial_conn() as conn:
+        row = require_production_row(conn, lead_id)
+        article = json_loads_maybe(row["article_json"])
+        if row["status"] not in {"article_imported", "wp_draft_failed"} or not isinstance(article, dict):
+            raise HTTPException(status_code=400, detail="Import a valid article before creating a WordPress draft.")
+        valid, errors = validate_article_payload(article)
+        if not valid:
+            raise HTTPException(status_code=400, detail={"message": "Stored article is invalid.", "errors": errors})
+        try:
+            draft = create_wordpress_draft(article)
+        except RuntimeError as exc:
+            conn.execute(
+                """
+                UPDATE production_queue
+                SET status = ?, wp_error = ?, updated_at = ?
+                WHERE lead_id = ?
+                """,
+                ("wp_draft_failed", str(exc), now, lead_id),
+            )
+            conn.commit()
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        conn.execute(
+            """
+            UPDATE production_queue
+            SET status = ?,
+                wp_draft_id = ?,
+                wp_draft_url = ?,
+                wp_edit_url = ?,
+                wp_yoast_status = ?,
+                wp_error = NULL,
+                updated_at = ?
+            WHERE lead_id = ?
+            """,
+            (
+                "wp_draft_created",
+                draft["wp_draft_id"],
+                draft["wp_draft_url"],
+                draft["wp_edit_url"],
+                draft["wp_yoast_status"],
+                now,
+                lead_id,
+            ),
+        )
+        conn.commit()
+    return {"lead_id": lead_id, "status": "wp_draft_created", **draft}
 
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

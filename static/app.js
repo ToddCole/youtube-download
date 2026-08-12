@@ -460,6 +460,15 @@ async function saveLeadDecision(leadId, decision) {
     const data = await res.json();
     if (!res.ok) throw new Error(getErrorMessage(data, "Failed to save decision"));
     applyDecisionLocally(data);
+    if (decision === "commission") {
+      applyProductionQueueLocally({
+        lead_id: leadId,
+        status: "commissioned",
+        source_lead: allKnownLeads().find((lead) => lead.lead_id === leadId) || null,
+        assessment: assessmentMap()[leadId] || null,
+        updated_at: data.updated_at,
+      });
+    }
   } catch (e) {
     if (previous) {
       applyDecisionLocally(previous);
@@ -689,6 +698,15 @@ function applyDecisionLocally(decision) {
   editorialResults.decisions[decision.lead_id] = decision;
 }
 
+function applyProductionQueueLocally(item) {
+  if (!editorialResults) editorialResults = {};
+  if (!editorialResults.production_queue) editorialResults.production_queue = {};
+  editorialResults.production_queue[item.lead_id] = {
+    ...(editorialResults.production_queue[item.lead_id] || {}),
+    ...item,
+  };
+}
+
 function renderDecisionSurfaces() {
   if (lastAgentReview) renderAgentReview(lastAgentReview);
   if (editorialResults) renderLeadInbox(editorialResults);
@@ -699,6 +717,7 @@ function renderProductionQueue() {
   const list = document.getElementById("production-queue-list");
   if (!list) return;
   const decisions = editorialResults?.decisions || {};
+  const queue = editorialResults?.production_queue || {};
   const leadsById = Object.fromEntries(allKnownLeads().map((lead) => [lead.lead_id, lead]));
   const commissioned = Object.values(decisions)
     .filter((item) => item.decision === "commission")
@@ -710,24 +729,160 @@ function renderProductionQueue() {
     return;
   }
   commissioned.forEach((item) => {
-    const lead = leadsById[item.lead_id] || {};
+    const queueItem = queue[item.lead_id] || {};
+    const lead = queueItem.source_lead || leadsById[item.lead_id] || {};
+    const assessment = queueItem.assessment || assessmentMap()[item.lead_id] || null;
+    const status = queueItem.status || "commissioned";
+    const hasPacket = Boolean(queueItem.writing_packet_markdown);
+    const canDraft = status === "article_imported" || status === "wp_draft_failed";
+    const domId = leadDomId(item.lead_id);
     const row = document.createElement("article");
     row.className = "queue-card";
     row.innerHTML = `
       <div class="lead-meta-row">
-        <span class="decision-pill decision-commission">Commissioned</span>
+        <span class="decision-pill decision-commission">${escapeHtml(productionStatusLabel(status))}</span>
         <span>${escapeHtml(lead.scanner_type || item.lead_id.split(":")[0] || "lead")}</span>
         <span>${escapeHtml(item.updated_at ? shortDate(item.updated_at) : "")}</span>
+        ${queueItem.wp_yoast_status ? `<span>Yoast: ${escapeHtml(queueItem.wp_yoast_status)}</span>` : ""}
       </div>
       <h3>${escapeHtml(lead.title || item.lead_id)}</h3>
-      <p>${escapeHtml(lead.likely_mfo_angle || lead.mfo_audience_fit || "")}</p>
+      <p>${escapeHtml(assessment?.mfo_angle || lead.likely_mfo_angle || lead.mfo_audience_fit || "")}</p>
+      ${queueItem.wp_error ? `<div class="status-message error">${escapeHtml(queueItem.wp_error)}</div>` : ""}
+      ${queueItem.wp_draft_url ? `<div class="small-muted">Draft: ${escapeHtml(queueItem.wp_draft_url)}</div>` : ""}
+      ${hasPacket ? `<div class="small-muted">Writing packet prepared.</div>` : ""}
+      <textarea id="article-import-${domId}" class="article-import-input" placeholder="Paste complete article JSON"></textarea>
       <div class="lead-actions">
         ${lead.source_url ? `<a class="btn btn-secondary" href="${escapeAttr(lead.source_url)}" target="_blank" rel="noreferrer">Open</a>` : ""}
+        <button class="btn btn-secondary" onclick="prepareWritingPacket('${escapeAttr(item.lead_id)}')">Prepare Writing Packet</button>
+        <button class="btn btn-secondary" ${hasPacket ? "" : "disabled"} onclick="copyWritingPacket('${escapeAttr(item.lead_id)}')">Copy Packet</button>
+        <button class="btn btn-secondary" ${hasPacket ? "" : "disabled"} onclick="downloadWritingPacket('${escapeAttr(item.lead_id)}')">Download Packet</button>
+        <button class="btn btn-primary" onclick="importArticleForLead('${escapeAttr(item.lead_id)}')">Import Article</button>
+        <button class="btn btn-download queue-draft-btn" ${canDraft ? "" : "disabled"} onclick="createWordPressDraft('${escapeAttr(item.lead_id)}')">Create WordPress Draft</button>
+        ${queueItem.wp_edit_url ? `<a class="btn btn-secondary" href="${escapeAttr(queueItem.wp_edit_url)}" target="_blank" rel="noreferrer">Open WP Draft</a>` : ""}
         ${decisionButtons(item.lead_id, item.decision, savingDecisionIds.has(item.lead_id))}
       </div>
     `;
     list.appendChild(row);
   });
+}
+
+function leadDomId(leadId) {
+  return String(leadId).replace(/[^a-zA-Z0-9_-]/g, "-");
+}
+
+function productionStatusLabel(status) {
+  return {
+    commissioned: "Commissioned",
+    writing_packet_prepared: "Packet Prepared",
+    article_imported: "Article Imported",
+    wp_draft_created: "WP Draft Created",
+    wp_draft_failed: "WP Draft Failed",
+  }[status] || status;
+}
+
+async function prepareWritingPacket(leadId) {
+  hideEditorialError();
+  const lead = allKnownLeads().find((item) => item.lead_id === leadId) || null;
+  const assessment = assessmentMap()[leadId] || null;
+  try {
+    const res = await fetch(`/api/editorial/production-queue/${encodeURIComponent(leadId)}/writing-packet`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lead, assessment }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(getErrorMessage(data, "Failed to prepare writing packet"));
+    applyProductionQueueLocally({
+      lead_id: leadId,
+      status: data.status,
+      source_lead: lead,
+      assessment,
+      writing_packet: data.packet,
+      writing_packet_markdown: data.packet.markdown,
+      updated_at: new Date().toISOString(),
+    });
+    renderProductionQueue();
+  } catch (e) {
+    showEditorialError(e.message);
+  }
+}
+
+async function copyWritingPacket(leadId) {
+  const markdown = editorialResults?.production_queue?.[leadId]?.writing_packet_markdown;
+  if (!markdown) return;
+  await navigator.clipboard.writeText(markdown);
+}
+
+function downloadWritingPacket(leadId) {
+  const markdown = editorialResults?.production_queue?.[leadId]?.writing_packet_markdown;
+  if (!markdown) return;
+  const blob = new Blob([markdown], { type: "text/markdown" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${leadDomId(leadId)}-writing-packet.md`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+async function importArticleForLead(leadId) {
+  hideEditorialError();
+  const input = document.getElementById(`article-import-${leadDomId(leadId)}`);
+  let article;
+  try {
+    article = JSON.parse(input.value);
+  } catch (e) {
+    showEditorialError("The pasted article is not valid JSON.");
+    return;
+  }
+  const lead = allKnownLeads().find((item) => item.lead_id === leadId) || null;
+  const assessment = assessmentMap()[leadId] || null;
+  try {
+    const res = await fetch(`/api/editorial/production-queue/${encodeURIComponent(leadId)}/article`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ article, lead, assessment }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(getErrorMessage(data, "Failed to import article"));
+    applyProductionQueueLocally({
+      lead_id: leadId,
+      status: data.status,
+      source_lead: lead,
+      assessment,
+      article: data.article,
+      headline: data.article.headline,
+      slug: data.article.slug,
+      updated_at: new Date().toISOString(),
+    });
+    input.value = "";
+    renderProductionQueue();
+  } catch (e) {
+    showEditorialError(e.message);
+  }
+}
+
+async function createWordPressDraft(leadId) {
+  hideEditorialError();
+  try {
+    const res = await fetch(`/api/editorial/production-queue/${encodeURIComponent(leadId)}/wp-draft`, { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(getErrorMessage(data, "Failed to create WordPress draft"));
+    applyProductionQueueLocally({
+      lead_id: leadId,
+      status: data.status,
+      wp_draft_id: data.wp_draft_id,
+      wp_draft_url: data.wp_draft_url,
+      wp_edit_url: data.wp_edit_url,
+      wp_yoast_status: data.wp_yoast_status,
+      wp_error: "",
+      updated_at: new Date().toISOString(),
+    });
+    renderProductionQueue();
+  } catch (e) {
+    showEditorialError(e.message);
+    await refreshEditorialResults();
+  }
 }
 
 function formatArray(value) {

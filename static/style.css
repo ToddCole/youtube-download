@@ -110,6 +110,27 @@ header {
 
 .btn-secondary:hover:not(:disabled) { background: #303030; }
 
+.btn-loading {
+  position: relative;
+  padding-left: 38px;
+}
+
+.btn-loading::before {
+  animation: spin 0.8s linear infinite;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: var(--text);
+  border-radius: 999px;
+  content: "";
+  height: 14px;
+  left: 16px;
+  position: absolute;
+  width: 14px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 .error-banner {
   background: rgba(255, 82, 82, 0.12);
   border: 1px solid rgba(255, 82, 82, 0.3);
@@ -453,6 +474,18 @@ header {
   margin-top: 14px;
 }
 
+.review-action-stack {
+  align-items: flex-end;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.review-action-stack .small-muted {
+  max-width: 280px;
+  text-align: right;
+}
+
 .manual-story-row {
   display: flex;
   gap: 10px;
@@ -643,9 +676,14 @@ header {
   }
 
   .desk-header,
-  .panel-heading {
+  .panel-heading,
+  .review-action-stack {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .review-action-stack .small-muted {
+    text-align: left;
   }
 
   .desk-controls .btn {

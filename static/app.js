@@ -429,6 +429,18 @@ function renderExcluded(results) {
   });
 }
 
+function setPrepareReviewState(state, message = "") {
+  const button = document.getElementById("prepare-review-btn");
+  const status = document.getElementById("prepare-review-status");
+  if (!button || !status) return;
+  const isLoading = state === "loading";
+  button.disabled = isLoading;
+  button.classList.toggle("btn-loading", isLoading);
+  button.textContent = isLoading ? "Preparing packet..." : "Prepare Agent Review";
+  status.textContent = message;
+  status.classList.toggle("hidden", !message);
+}
+
 async function saveLeadDecision(leadId, decision) {
   try {
     const res = await fetch("/api/editorial/decisions", {
@@ -446,6 +458,7 @@ async function saveLeadDecision(leadId, decision) {
 
 async function prepareAgentReview() {
   hideEditorialError();
+  setPrepareReviewState("loading", "Preparing review packet...");
   try {
     const res = await fetch("/api/editorial/review-packet", {
       method: "POST",
@@ -460,10 +473,16 @@ async function prepareAgentReview() {
     const newsCount = data.packet?.review_candidates?.news?.length || 0;
     const researchCount = data.packet?.review_candidates?.research?.length || 0;
     const manualCount = data.packet?.review_candidates?.manual?.length || 0;
-    document.getElementById("packet-summary").textContent = `${creatorCount} Creator, ${newsCount} News, ${researchCount} Research and ${manualCount} Manual candidates ready.`;
+    const summary = `${creatorCount} Creator, ${newsCount} News, ${researchCount} Research and ${manualCount} Manual candidates ready.`;
+    document.getElementById("packet-summary").textContent = summary;
+    setPrepareReviewState("idle", summary);
     if (editorialResults) renderLeadInbox(editorialResults);
   } catch (e) {
     showEditorialError(e.message);
+    setPrepareReviewState("idle", "Packet preparation failed.");
+  } finally {
+    const button = document.getElementById("prepare-review-btn");
+    if (button) button.disabled = false;
   }
 }
 

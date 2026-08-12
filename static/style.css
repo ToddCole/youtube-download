@@ -362,7 +362,8 @@ header {
 .scanner-card,
 .desk-panel,
 .lead-card,
-.recommendation-card {
+.recommendation-card,
+.queue-card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -413,7 +414,8 @@ header {
 
 .state-pill,
 .source-pill,
-.rating-pill {
+.rating-pill,
+.decision-pill {
   background: var(--surface2);
   border: 1px solid var(--border);
   border-radius: 999px;
@@ -451,6 +453,21 @@ header {
 }
 
 .rating-Weak {
+  border-color: rgba(255, 82, 82, 0.5);
+  color: var(--error);
+}
+
+.decision-commission {
+  border-color: rgba(61, 186, 110, 0.5);
+  color: var(--success);
+}
+
+.decision-hold {
+  border-color: rgba(255, 188, 66, 0.5);
+  color: #ffbc42;
+}
+
+.decision-reject {
   border-color: rgba(255, 82, 82, 0.5);
   color: var(--error);
 }
@@ -579,7 +596,8 @@ header {
 }
 
 .lead-card,
-.recommendation-card {
+.recommendation-card,
+.queue-card {
   padding: 15px;
 }
 
@@ -591,17 +609,39 @@ header {
 }
 
 .lead-card h3,
-.recommendation-card h3 {
+.recommendation-card h3,
+.queue-card h3 {
   font-size: 16px;
   line-height: 1.35;
   margin-bottom: 8px;
 }
 
-.lead-card p {
+.lead-card p,
+.queue-card p {
   color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.45;
   margin-bottom: 10px;
+}
+
+.production-queue {
+  border-top: 1px solid var(--border);
+  margin-top: 18px;
+  padding-top: 16px;
+}
+
+.compact-heading {
+  margin-bottom: 0;
+}
+
+.compact-heading h3 {
+  font-size: 15px;
+}
+
+.compact-heading p {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-top: 3px;
 }
 
 .lead-facts {

@@ -202,6 +202,7 @@ let lastAgentReview = null;
 let editorialPoll = null;
 let activeLeadTab = "creator";
 let manualStories = [];
+const savingDecisionIds = new Set();
 
 function fmt(value, fallback = "Not available") {
   if (value === null || value === undefined || value === "") return fallback;
@@ -236,6 +237,7 @@ async function refreshEditorialResults() {
     renderScannerStatus(data.status.news, "news-status-card");
     renderScannerStatus(data.status.research, "research-status-card");
     renderLeadInbox(data);
+    renderProductionQueue();
     manageEditorialPolling(data.status);
   } catch (e) {
     showEditorialError(e.message);
@@ -251,7 +253,7 @@ async function runEditorialScan(type) {
     await refreshEditorialResults();
     manageEditorialPolling({ creator: { state: "running" }, news: { state: "running" }, research: { state: "running" } });
   } catch (e) {
-    showEditorialError(e.message);
+    showEditorialError(`Failed to save decision: ${e.message}`);
   }
 }
 
@@ -330,6 +332,7 @@ function renderLeadInbox(results) {
   el.replaceChildren();
   leads.forEach((lead, index) => {
     const decision = decisions[lead.lead_id]?.decision || "";
+    const saving = savingDecisionIds.has(lead.lead_id);
     const assessment = assessments[lead.lead_id] || null;
     const card = document.createElement("article");
     card.className = "lead-card";
@@ -342,6 +345,8 @@ function renderLeadInbox(results) {
         ${lead.scanner_score !== null && lead.scanner_score !== undefined ? `<strong>${lead.scanner_score}</strong>` : ""}
         ${assessment ? `<span class="rating-pill rating-${escapeAttr(assessment.agent_rating || "Weak")}">${escapeHtml(assessment.agent_rating || "")}</span>` : ""}
         ${assessment?.editorial_rank ? `<span>Editorial rank ${escapeHtml(String(assessment.editorial_rank))}</span>` : ""}
+        ${decision ? `<span class="decision-pill decision-${escapeAttr(decision)}">${decisionLabel(decision)}</span>` : ""}
+        ${saving ? `<span>Saving...</span>` : ""}
       </div>
       <h3>${escapeHtml(lead.title || "Untitled")}</h3>
       <p>${escapeHtml(lead.likely_mfo_angle || lead.mfo_audience_fit || lead.weakness_or_rejection_reason || "")}</p>
@@ -362,9 +367,7 @@ function renderLeadInbox(results) {
       </div>
       <div class="lead-actions">
         <a class="btn btn-secondary" href="${escapeAttr(lead.source_url || "#")}" target="_blank" rel="noreferrer">Open</a>
-        <button class="btn ${decision === "commission" ? "btn-primary" : "btn-secondary"}" onclick="saveLeadDecision('${escapeAttr(lead.lead_id)}', 'commission')">Commission</button>
-        <button class="btn ${decision === "hold" ? "btn-primary" : "btn-secondary"}" onclick="saveLeadDecision('${escapeAttr(lead.lead_id)}', 'hold')">Hold</button>
-        <button class="btn ${decision === "reject" ? "btn-primary" : "btn-secondary"}" onclick="saveLeadDecision('${escapeAttr(lead.lead_id)}', 'reject')">Reject</button>
+        ${decisionButtons(lead.lead_id, decision, saving)}
       </div>
     `;
     el.appendChild(card);
@@ -442,6 +445,12 @@ function setPrepareReviewState(state, message = "") {
 }
 
 async function saveLeadDecision(leadId, decision) {
+  if (savingDecisionIds.has(leadId)) return;
+  hideEditorialError();
+  const previous = editorialResults?.decisions?.[leadId] || null;
+  savingDecisionIds.add(leadId);
+  applyDecisionLocally({ lead_id: leadId, decision, note: previous?.note || "", updated_at: new Date().toISOString() });
+  renderDecisionSurfaces();
   try {
     const res = await fetch("/api/editorial/decisions", {
       method: "POST",
@@ -450,9 +459,17 @@ async function saveLeadDecision(leadId, decision) {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(getErrorMessage(data, "Failed to save decision"));
-    await refreshEditorialResults();
+    applyDecisionLocally(data);
   } catch (e) {
+    if (previous) {
+      applyDecisionLocally(previous);
+    } else if (editorialResults?.decisions) {
+      delete editorialResults.decisions[leadId];
+    }
     showEditorialError(e.message);
+  } finally {
+    savingDecisionIds.delete(leadId);
+    renderDecisionSurfaces();
   }
 }
 
@@ -575,6 +592,7 @@ async function importAgentReview() {
     if (!res.ok) throw new Error(getErrorMessage(data, "Malformed supervisor response"));
     lastAgentReview = data.response;
     renderAgentReview(lastAgentReview);
+    renderProductionQueue();
   } catch (e) {
     errorEl.textContent = e.message;
     errorEl.classList.remove("hidden");
@@ -599,6 +617,8 @@ function renderAgentReview(review) {
   recommended.forEach((item, index) => {
     const lead = item.lead || {};
     const rec = item.assessment || {};
+    const decision = editorialResults?.decisions?.[item.leadId]?.decision || "";
+    const saving = savingDecisionIds.has(item.leadId);
     const card = document.createElement("article");
     card.className = "recommendation-card";
     card.innerHTML = `
@@ -607,6 +627,8 @@ function renderAgentReview(review) {
         <span>${escapeHtml(lead.scanner_type || rec.scanner_type || "")}</span>
         <span class="rating-pill rating-${escapeAttr(rec.agent_rating || "Possible")}">${escapeHtml(rec.agent_rating || "Possible")}</span>
         <span>Raw rank ${escapeHtml(String(lead.raw_scanner_rank || ""))}</span>
+        ${decision ? `<span class="decision-pill decision-${escapeAttr(decision)}">${decisionLabel(decision)}</span>` : ""}
+        ${saving ? `<span>Saving...</span>` : ""}
       </div>
       <h3>${escapeHtml(lead.title || item.leadId)}</h3>
       <dl class="recommendation-grid">
@@ -618,20 +640,94 @@ function renderAgentReview(review) {
         <div><dt>Action</dt><dd>${escapeHtml(rec.recommended_action || "")}</dd></div>
       </dl>
       <div class="lead-actions">
-        <button class="btn btn-secondary" onclick="saveLeadDecision('${escapeAttr(item.leadId)}', 'commission')">Commission</button>
-        <button class="btn btn-secondary" onclick="saveLeadDecision('${escapeAttr(item.leadId)}', 'hold')">Hold</button>
-        <button class="btn btn-secondary" onclick="saveLeadDecision('${escapeAttr(item.leadId)}', 'reject')">Reject</button>
+        ${decisionButtons(item.leadId, decision, saving)}
       </div>
     `;
     list.appendChild(card);
   });
 
   if (editorialResults) renderLeadInbox(editorialResults);
+  renderProductionQueue();
 }
 
 function allPacketCandidates() {
   const grouped = reviewPacket?.packet?.review_candidates || {};
   return ["creator", "news", "research", "manual"].flatMap((key) => grouped[key] || []);
+}
+
+function allKnownLeads() {
+  const packetLeads = allPacketCandidates();
+  const resultLeads = ["creator", "news", "research"].flatMap((key) => editorialResults?.[key]?.leads || []);
+  const manualLeads = manualStoryLeadFallbacks();
+  const map = new Map();
+  [...packetLeads, ...resultLeads, ...manualLeads].forEach((lead) => {
+    if (lead?.lead_id && !map.has(lead.lead_id)) map.set(lead.lead_id, lead);
+  });
+  return [...map.values()];
+}
+
+function decisionLabel(decision) {
+  return {
+    commission: "Commissioned",
+    hold: "Held",
+    reject: "Rejected",
+  }[decision] || "";
+}
+
+function decisionButtons(leadId, decision, saving) {
+  const disabled = saving ? "disabled" : "";
+  return `
+    <button class="btn ${decision === "commission" ? "btn-primary" : "btn-secondary"}" ${disabled} onclick="saveLeadDecision('${escapeAttr(leadId)}', 'commission')">Commission</button>
+    <button class="btn ${decision === "hold" ? "btn-primary" : "btn-secondary"}" ${disabled} onclick="saveLeadDecision('${escapeAttr(leadId)}', 'hold')">Hold</button>
+    <button class="btn ${decision === "reject" ? "btn-primary" : "btn-secondary"}" ${disabled} onclick="saveLeadDecision('${escapeAttr(leadId)}', 'reject')">Reject</button>
+  `;
+}
+
+function applyDecisionLocally(decision) {
+  if (!editorialResults) editorialResults = {};
+  if (!editorialResults.decisions) editorialResults.decisions = {};
+  editorialResults.decisions[decision.lead_id] = decision;
+}
+
+function renderDecisionSurfaces() {
+  if (lastAgentReview) renderAgentReview(lastAgentReview);
+  if (editorialResults) renderLeadInbox(editorialResults);
+  renderProductionQueue();
+}
+
+function renderProductionQueue() {
+  const list = document.getElementById("production-queue-list");
+  if (!list) return;
+  const decisions = editorialResults?.decisions || {};
+  const leadsById = Object.fromEntries(allKnownLeads().map((lead) => [lead.lead_id, lead]));
+  const commissioned = Object.values(decisions)
+    .filter((item) => item.decision === "commission")
+    .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
+  list.className = commissioned.length ? "lead-list production-queue-list" : "lead-list empty-state";
+  list.replaceChildren();
+  if (!commissioned.length) {
+    list.textContent = "No commissioned stories yet.";
+    return;
+  }
+  commissioned.forEach((item) => {
+    const lead = leadsById[item.lead_id] || {};
+    const row = document.createElement("article");
+    row.className = "queue-card";
+    row.innerHTML = `
+      <div class="lead-meta-row">
+        <span class="decision-pill decision-commission">Commissioned</span>
+        <span>${escapeHtml(lead.scanner_type || item.lead_id.split(":")[0] || "lead")}</span>
+        <span>${escapeHtml(item.updated_at ? shortDate(item.updated_at) : "")}</span>
+      </div>
+      <h3>${escapeHtml(lead.title || item.lead_id)}</h3>
+      <p>${escapeHtml(lead.likely_mfo_angle || lead.mfo_audience_fit || "")}</p>
+      <div class="lead-actions">
+        ${lead.source_url ? `<a class="btn btn-secondary" href="${escapeAttr(lead.source_url)}" target="_blank" rel="noreferrer">Open</a>` : ""}
+        ${decisionButtons(item.lead_id, item.decision, savingDecisionIds.has(item.lead_id))}
+      </div>
+    `;
+    list.appendChild(row);
+  });
 }
 
 function formatArray(value) {

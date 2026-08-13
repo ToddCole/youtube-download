@@ -1096,11 +1096,90 @@ def hard_excluded_statuses(scanner_type: str) -> set[str]:
 
 
 def lead_score_value(lead: dict) -> float:
-    value = lead.get("scanner_score", lead.get("score", 0))
+    value = lead.get("editorial_opportunity_score", lead.get("scanner_score", lead.get("score", 0)))
     try:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def packet_fingerprints(lead: dict[str, Any]) -> set[str]:
+    fingerprints = {str(item) for item in lead.get("source_fingerprints", []) if isinstance(item, str)}
+    for key in ("source_url", "url"):
+        value = lead.get(key)
+        if isinstance(value, str) and value:
+            fingerprints.add(f"url:{normalise_packet_url(value)}")
+    primary = lead.get("primary_source")
+    if isinstance(primary, dict):
+        for key in ("url", "publisher_url"):
+            value = primary.get(key)
+            if isinstance(value, str) and value:
+                fingerprints.add(f"url:{normalise_packet_url(value)}")
+        if primary.get("pmid"):
+            fingerprints.add(f"pmid:{primary['pmid']}")
+        if primary.get("doi"):
+            fingerprints.add(f"doi:{str(primary['doi']).lower()}")
+    for url in lead.get("evidence_links", []) if isinstance(lead.get("evidence_links"), list) else []:
+        if isinstance(url, str) and url:
+            fingerprints.add(f"url:{normalise_packet_url(url)}")
+    return {item for item in fingerprints if item and not item.endswith(":")}
+
+
+def normalise_packet_url(url: str) -> str:
+    from urllib.parse import parse_qs, urlparse, urlencode
+
+    parsed = urlparse(url.strip().rstrip(").,]"))
+    if not parsed.scheme or not parsed.netloc:
+        return url.strip().lower()
+    host = parsed.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    query_pairs = []
+    for key, values in parse_qs(parsed.query).items():
+        if key.lower().startswith("utm_") or key.lower() in {"fbclid", "gclid", "oc", "ceid"}:
+            continue
+        for value in values:
+            query_pairs.append((key.lower(), value))
+    return parsed._replace(netloc=host, fragment="", query=urlencode(sorted(query_pairs))).geturl().rstrip("/").lower()
+
+
+def dedupe_packet_candidates(groups: dict[str, list[dict]]) -> tuple[dict[str, list[dict]], list[dict[str, Any]]]:
+    priority = {"manual": 0, "research": 1, "news": 2, "creator": 3}
+    flattened: list[tuple[str, dict]] = []
+    for group, leads in groups.items():
+        for lead in leads:
+            flattened.append((group, lead))
+    kept: list[tuple[str, dict]] = []
+    duplicate_notes: list[dict[str, Any]] = []
+    for group, lead in sorted(flattened, key=lambda item: (priority.get(item[0], 9), -lead_score_value(item[1]))):
+        fingerprints = packet_fingerprints(lead)
+        duplicate_index = next((index for index, (_kept_group, kept_lead) in enumerate(kept) if fingerprints and fingerprints & packet_fingerprints(kept_lead)), None)
+        if duplicate_index is None:
+            kept.append((group, {**lead, "duplicate_supporting_sources": []}))
+            continue
+        kept_group, kept_lead = kept[duplicate_index]
+        kept_lead.setdefault("duplicate_supporting_sources", []).append(
+            {
+                "lead_id": lead.get("lead_id"),
+                "scanner_type": lead.get("scanner_type"),
+                "title": lead.get("title"),
+                "source_url": lead.get("source_url"),
+                "matched_fingerprints": sorted(fingerprints & packet_fingerprints(kept_lead)),
+            }
+        )
+        duplicate_notes.append(
+            {
+                "kept_lead_id": kept_lead.get("lead_id"),
+                "merged_lead_id": lead.get("lead_id"),
+                "reason": "shared source fingerprint",
+                "kept_group": kept_group,
+                "merged_group": group,
+            }
+        )
+    deduped = {key: [] for key in groups}
+    for group, lead in kept:
+        deduped.setdefault(group, []).append(lead)
+    return deduped, duplicate_notes
 
 
 def packet_leads(payload: dict, limit: int = 10) -> tuple[list[dict], list[dict]]:
@@ -1133,6 +1212,7 @@ def manual_story_candidates(manual_stories: list[dict[str, Any]] | None) -> list
         if not text:
             continue
         url_match = re.search(r"https?://\S+", text)
+        source_url = url_match.group(0).rstrip(").,") if url_match else ""
         candidates.append(
             {
                 "lead_id": f"manual:{index}",
@@ -1140,7 +1220,7 @@ def manual_story_candidates(manual_stories: list[dict[str, Any]] | None) -> list
                 "source_name": "Editor supplied",
                 "source_category": "manual",
                 "title": text[:140],
-                "source_url": url_match.group(0).rstrip(").,") if url_match else "",
+                "source_url": source_url,
                 "published_at": None,
                 "discovered_at": utc_iso(),
                 "scanner_score": None,
@@ -1149,7 +1229,8 @@ def manual_story_candidates(manual_stories: list[dict[str, Any]] | None) -> list
                 "likely_mfo_angle": "Editor-supplied lead. Verify from primary sources before commissioning.",
                 "weakness_or_rejection_reason": "Not discovered by scanner; needs manual validation.",
                 "archive_overlap": None,
-                "evidence_links": [url_match.group(0).rstrip(").,")] if url_match else [],
+                "evidence_links": [source_url] if source_url else [],
+                "source_fingerprints": [f"url:{normalise_packet_url(source_url)}"] if source_url else [],
             }
         )
     return candidates
@@ -1169,6 +1250,28 @@ def build_review_packet(manual_stories: list[dict[str, Any]] | None = None) -> d
     news_candidates, news_excluded = packet_leads(news, 10)
     research_candidates, research_excluded = packet_leads(research, 10)
     manual_candidates = manual_story_candidates(manual_stories)
+    review_candidates, duplicate_notes = dedupe_packet_candidates(
+        {
+            "creator": creator_candidates,
+            "news": news_candidates,
+            "research": research_candidates,
+            "manual": manual_candidates,
+        }
+    )
+    creator_candidates = review_candidates.get("creator", [])
+    news_candidates = review_candidates.get("news", [])
+    research_candidates = review_candidates.get("research", [])
+    manual_candidates = review_candidates.get("manual", [])
+    commission_now = sorted(
+        [lead for leads in review_candidates.values() for lead in leads if lead_score_value(lead) >= 70],
+        key=lead_score_value,
+        reverse=True,
+    )[:3]
+    hold_for_follow_up = sorted(
+        [lead for leads in review_candidates.values() for lead in leads if 50 <= lead_score_value(lead) < 70],
+        key=lead_score_value,
+        reverse=True,
+    )[:3]
     packet = {
         "packet_schema_version": 2,
         "generated_at": utc_iso(),
@@ -1201,6 +1304,22 @@ def build_review_packet(manual_stories: list[dict[str, Any]] | None = None) -> d
                 "candidate_count": len(manual_candidates),
                 "excluded_count": 0,
             },
+            "archive": {
+                "refreshed_at": mfo_index.get("refreshed_at") or mfo_index.get("generated_at"),
+                "source_fingerprint_count": mfo_index.get("source_fingerprint_count", 0),
+                "warning": mfo_index.get("archive_warning", ""),
+            },
+        },
+        "daily_editorial": {
+            "commission_now": commission_now,
+            "hold_for_follow_up": hold_for_follow_up,
+            "duplicate_notes": duplicate_notes,
+            "rejection_summary": {
+                "creator": len(creator_excluded),
+                "news": len(news_excluded),
+                "research": len(research_excluded),
+                "manual": 0,
+            },
         },
         "editorial_supervisor_prompt": prompt,
         "required_response_schema": schema,
@@ -1226,6 +1345,8 @@ def build_review_packet(manual_stories: list[dict[str, Any]] | None = None) -> d
             "index_path": str(SCANNER_DIR / "mfo_index.json"),
             "refreshed_at": mfo_index.get("refreshed_at") or mfo_index.get("generated_at"),
             "page_count": len(mfo_index.get("pages", [])) if isinstance(mfo_index.get("pages"), list) else None,
+            "source_fingerprint_count": mfo_index.get("source_fingerprint_count", 0),
+            "warning": mfo_index.get("archive_warning", ""),
         },
         "editorial_source_information": editorial_sources,
         "instructions": "Assess every lead in review_candidates. Return valid JSON with reviewed_candidates for every supplied lead and recommended_ids separately. Do not wrap it in Markdown fences.",
@@ -1282,6 +1403,7 @@ def render_review_packet_markdown(packet: dict) -> str:
             {
                 "scanner_metadata": packet.get("scanner_metadata"),
                 "review_candidates": packet.get("review_candidates"),
+                "daily_editorial": packet.get("daily_editorial"),
                 "excluded_candidates": packet.get("excluded_candidates"),
                 "archive_overlap_information": packet.get("archive_overlap_information"),
                 "editorial_source_information": packet.get("editorial_source_information"),
@@ -1340,6 +1462,8 @@ def validate_agent_review_payload(payload: Any) -> tuple[bool, list[str]]:
                 errors.append(f"reviewed_candidates[{index}].agent_rating must be Strong, Possible or Weak.")
             if item.get("recommended_action") not in {"commission", "hold", "reject"}:
                 errors.append(f"reviewed_candidates[{index}].recommended_action must be commission, hold or reject.")
+            if "primary_source_url" in item and (not isinstance(item.get("primary_source_url"), str) or not item.get("primary_source_url", "").strip()):
+                errors.append(f"reviewed_candidates[{index}].primary_source_url must be a non-empty string when supplied.")
         if isinstance(recommended_ids, list):
             missing_recommended = [lead_id for lead_id in recommended_ids if isinstance(lead_id, str) and lead_id not in seen_ids]
             if missing_recommended:

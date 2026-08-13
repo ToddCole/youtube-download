@@ -21,7 +21,7 @@ from statistics import median
 from typing import Any
 from email.utils import parsedate_to_datetime
 from urllib.error import URLError
-from urllib.parse import quote_plus, urlencode, urljoin, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
@@ -95,10 +95,13 @@ OVERLAP_STOPWORDS = STOPWORDS | {
     "muscle",
     "new",
     "release",
+    "review",
     "research",
     "science",
     "study",
     "training",
+    "strength",
+    "exercise",
 }
 YOUTUBE_ID_RE = re.compile(
     r"(?:youtube\.com/(?:watch\?v=|embed/|shorts/)|youtu\.be/)([A-Za-z0-9_-]{6,})"
@@ -212,8 +215,12 @@ class MfoPage:
     url: str
     slug: str
     date: str | None = None
+    modified: str | None = None
     source_urls: list[str] | None = None
     youtube_ids: list[str] | None = None
+    pmids: list[str] | None = None
+    dois: list[str] | None = None
+    source_fingerprints: list[str] | None = None
 
 
 @dataclass
@@ -276,6 +283,7 @@ class ResearchPaper:
     archive_overlap: Overlap | None = None
     public_interest: dict[str, Any] | None = None
     rejection_reasons: list[str] | None = None
+    extraction_warnings: list[str] | None = None
 
 
 class QuietYtdlpLogger:
@@ -424,9 +432,94 @@ def clean_url(url: str) -> str:
     return parsed._replace(fragment="").geturl().rstrip("/")
 
 
+def canonical_url(url: str) -> str:
+    cleaned = clean_url(url)
+    if not cleaned:
+        return ""
+    parsed = urlparse(unwrap_redirect_url(cleaned))
+    scheme = parsed.scheme.lower() or "https"
+    host = parsed.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    query_pairs = []
+    for key, values in parse_qs(parsed.query, keep_blank_values=False).items():
+        key_lower = key.lower()
+        if key_lower.startswith("utm_") or key_lower in {"fbclid", "gclid", "oc", "ceid", "hl", "gl"}:
+            continue
+        for value in values:
+            query_pairs.append((key_lower, value))
+    query = urlencode(sorted(query_pairs))
+    path = re.sub(r"/+", "/", parsed.path or "/")
+    if path != "/":
+        path = path.rstrip("/")
+    return urlparse("")._replace(scheme=scheme, netloc=host, path=path, query=query).geturl()
+
+
+def unwrap_redirect_url(url: str) -> str:
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+    for key in ("url", "u", "q", "target", "destination"):
+        value = params.get(key, [""])[0]
+        if value.startswith("http"):
+            return clean_url(unquote(value)) or value
+    return url
+
+
 def youtube_id_from_url(url: str) -> str | None:
     match = YOUTUBE_ID_RE.search(url)
     return match.group(1) if match else None
+
+
+def extract_pmids(text: str) -> list[str]:
+    pmids = set(re.findall(r"(?:PMID[:\s]*|pubmed\.ncbi\.nlm\.nih\.gov/)(\d{4,10})", text, re.I))
+    return sorted(pmids)
+
+
+def extract_dois(text: str) -> list[str]:
+    dois = {doi.rstrip(".,);]").lower() for doi in DOI_RE.findall(text or "")}
+    return sorted(dois)
+
+
+def fingerprints_for_values(*values: str | None, pmid: str | None = None, doi: str | None = None) -> set[str]:
+    fingerprints: set[str] = set()
+    if pmid:
+        fingerprints.add(f"pmid:{pmid}")
+    if doi:
+        fingerprints.add(f"doi:{doi.lower().rstrip('.,);]')}")
+        fingerprints.add(f"url:{canonical_url(f'https://doi.org/{doi}')}")
+    for value in values:
+        if not value:
+            continue
+        text = str(value)
+        for video_id in extract_youtube_ids(text):
+            fingerprints.add(f"youtube:{video_id}")
+        for item_pmid in extract_pmids(text):
+            fingerprints.add(f"pmid:{item_pmid}")
+        for item_doi in extract_dois(text):
+            fingerprints.add(f"doi:{item_doi}")
+            fingerprints.add(f"url:{canonical_url(f'https://doi.org/{item_doi}')}")
+        for url in extract_source_urls(text):
+            canonical = canonical_url(url)
+            if canonical:
+                fingerprints.add(f"url:{canonical}")
+            video_id = youtube_id_from_url(url)
+            if video_id:
+                fingerprints.add(f"youtube:{video_id}")
+    return {item for item in fingerprints if item and not item.endswith(":")}
+
+
+def page_fingerprints(page: MfoPage) -> set[str]:
+    if page.source_fingerprints:
+        return set(page.source_fingerprints)
+    values = [page.url, page.title, page.slug, *(page.source_urls or [])]
+    fingerprints = fingerprints_for_values(*values)
+    for video_id in page.youtube_ids or []:
+        fingerprints.add(f"youtube:{video_id}")
+    for pmid in page.pmids or []:
+        fingerprints.add(f"pmid:{pmid}")
+    for doi in page.dois or []:
+        fingerprints.add(f"doi:{doi.lower()}")
+    return fingerprints
 
 
 def extract_source_urls(content: str) -> list[str]:
@@ -440,10 +533,14 @@ def extract_youtube_ids(content: str) -> list[str]:
 
 
 def index_payload(pages: list[MfoPage], site_url: str, source: str) -> dict[str, Any]:
+    for page in pages:
+        page.source_fingerprints = sorted(page_fingerprints(page))
     return {
         "site_url": site_url.rstrip("/"),
         "source": source,
         "refreshed_at": iso(utc_now()),
+        "archive_warning": "",
+        "source_fingerprint_count": len({fingerprint for page in pages for fingerprint in page_fingerprints(page)}),
         "pages": [page.__dict__ for page in pages],
     }
 
@@ -455,7 +552,7 @@ def fetch_wordpress_posts(site_url: str) -> list[MfoPage]:
     while total_pages is None or page_num <= total_pages:
         api_url = (
             f"{site_url.rstrip('/')}/wp-json/wp/v2/posts"
-            f"?per_page=100&page={page_num}&_fields=link,slug,title,date,content"
+            f"?per_page=100&page={page_num}&_fields=link,slug,title,date,modified,content,excerpt"
         )
         try:
             text, headers = http_get(api_url)
@@ -474,7 +571,9 @@ def fetch_wordpress_posts(site_url: str) -> list[MfoPage]:
                 continue
             rendered = post.get("title", {}).get("rendered", "") if isinstance(post.get("title"), dict) else ""
             content = post.get("content", {}).get("rendered", "") if isinstance(post.get("content"), dict) else ""
+            excerpt = post.get("excerpt", {}).get("rendered", "") if isinstance(post.get("excerpt"), dict) else ""
             url = str(post.get("link") or "")
+            searchable = " ".join([rendered, content, excerpt, url])
             slug = str(post.get("slug") or urlparse(url).path.strip("/").split("/")[-1])
             if url:
                 pages.append(
@@ -483,8 +582,11 @@ def fetch_wordpress_posts(site_url: str) -> list[MfoPage]:
                         url=url,
                         slug=slug,
                         date=post.get("date"),
+                        modified=post.get("modified"),
                         source_urls=extract_source_urls(content),
                         youtube_ids=extract_youtube_ids(content),
+                        pmids=extract_pmids(searchable),
+                        dois=extract_dois(searchable),
                     )
                 )
         page_num += 1
@@ -521,7 +623,7 @@ def fetch_sitemap_posts(site_url: str, max_sitemaps: int = 12) -> list[MfoPage]:
             path = urlparse(url).path.strip("/")
             if not path or any(part in path for part in ("/tag/", "/category/", "wp-content")):
                 continue
-            pages.append(MfoPage(title=slug_to_title(url), url=url, slug=path.split("/")[-1], source_urls=[], youtube_ids=[]))
+            pages.append(MfoPage(title=slug_to_title(url), url=url, slug=path.split("/")[-1], source_urls=[], youtube_ids=[], pmids=[], dois=[]))
     return pages
 
 
@@ -543,7 +645,14 @@ def load_mfo_index(index_path: Path, site_url: str, refresh: bool = False) -> di
             return refresh_mfo_index(site_url, index_path)
         except (URLError, TimeoutError, OSError, ValueError) as exc:
             print(f"Warning: could not refresh MFO index: {exc}", file=sys.stderr)
-            return {}
+            return {
+                "site_url": site_url.rstrip("/"),
+                "source": "unavailable",
+                "refreshed_at": None,
+                "archive_warning": f"MFO archive refresh failed and no cache was available: {exc}",
+                "source_fingerprint_count": 0,
+                "pages": [],
+            }
 
     try:
         payload = json.loads(index_path.read_text(encoding="utf-8"))
@@ -556,6 +665,13 @@ def load_mfo_index(index_path: Path, site_url: str, refresh: bool = False) -> di
             return refresh_mfo_index(site_url, index_path)
         except (URLError, TimeoutError, OSError, ValueError) as exc:
             print(f"Warning: using stale MFO index after refresh failed: {exc}", file=sys.stderr)
+            payload["archive_warning"] = f"Using cached MFO archive after refresh failed: {exc}"
+            payload["source"] = f"{payload.get('source', 'cache')}-cached"
+    payload.setdefault("archive_warning", "")
+    payload.setdefault(
+        "source_fingerprint_count",
+        len({fingerprint for page in mfo_pages_from_index(payload) for fingerprint in page_fingerprints(page)}),
+    )
     return payload if isinstance(payload, dict) else {}
 
 
@@ -578,26 +694,23 @@ def mfo_pages_from_index(index: dict[str, Any]) -> list[MfoPage]:
                     url=url,
                     slug=str(item.get("slug") or ""),
                     date=item.get("date"),
+                    modified=item.get("modified"),
                     source_urls=[str(source) for source in item.get("source_urls", []) if isinstance(source, str)],
                     youtube_ids=[str(video_id) for video_id in item.get("youtube_ids", []) if isinstance(video_id, str)],
+                    pmids=[str(pmid) for pmid in item.get("pmids", []) if isinstance(pmid, str)],
+                    dois=[str(doi) for doi in item.get("dois", []) if isinstance(doi, str)],
+                    source_fingerprints=[str(fingerprint) for fingerprint in item.get("source_fingerprints", []) if isinstance(fingerprint, str)],
                 )
             )
     return pages
 
 
 def exact_source_match(obs: Observation, pages: list[MfoPage]) -> MfoPage | None:
-    obs_urls = {clean_url(obs.video_url)}
+    obs_fingerprints = fingerprints_for_values(obs.video_url, obs.video_title)
     if obs.video_id:
-        obs_urls.add(f"https://www.youtube.com/watch?v={obs.video_id}")
-        obs_urls.add(f"https://youtu.be/{obs.video_id}")
+        obs_fingerprints.add(f"youtube:{obs.video_id}")
     for page in pages:
-        if obs.video_id and obs.video_id in set(page.youtube_ids or []):
-            return page
-        page_urls = {clean_url(url) for url in page.source_urls or []}
-        page_video_ids = {youtube_id_from_url(url) for url in page_urls}
-        if obs.video_id and obs.video_id in page_video_ids:
-            return page
-        if obs_urls & page_urls:
+        if obs_fingerprints & page_fingerprints(page):
             return page
     return None
 
@@ -998,9 +1111,11 @@ def creator_lead_payload(
     status: str,
     rejection_reason: str | None = None,
     exact_page: MfoPage | None = None,
+    transcript_enrichment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     profile = profile_for(obs, profiles)
     overlap = find_overlap(obs, pages)
+    dimensions = creator_editorial_dimensions(obs, profiles, pages)
     traction = {
         "view_count": obs.view_count,
         "duration_seconds": obs.duration_seconds,
@@ -1023,6 +1138,13 @@ def creator_lead_payload(
         "discovered_at": obs.scan_timestamp,
         "traction": traction,
         "scanner_score": obs.breakout_score,
+        "audience_momentum": {
+            "relative_channel_breakout": dimensions["relative_channel_breakout"],
+            "observed_hourly_growth": dimensions["observed_hourly_growth"],
+            "absolute_views": dimensions["absolute_views"],
+        },
+        "editorial_opportunity_score": dimensions["score"],
+        "editorial_score_breakdown": {key: value for key, value in dimensions.items() if key != "score"},
         "likely_mfo_angle": profile.get("default_angle"),
         "mfo_audience_fit": profile.get("mfo_fit"),
         "weakness_or_rejection_reason": rejection_reason or profile.get("default_weakness"),
@@ -1038,6 +1160,8 @@ def creator_lead_payload(
             "notes": "YouTube thumbnail may be available; verify usage rights before publication.",
         },
         "evidence_links": [obs.video_url],
+        "source_fingerprints": sorted(fingerprints_for_values(obs.video_url, obs.video_title)),
+        "creator_enrichment": transcript_enrichment or {"available": False, "warning": "Transcript enrichment was not requested for this candidate."},
         "status": status,
         "existing_mfo_page": mfo_page_payload(exact_page),
     }
@@ -1110,6 +1234,120 @@ def reject_reason(obs: Observation, profiles: dict[str, dict[str, str]], pages: 
     return None
 
 
+def creator_editorial_dimensions(obs: Observation, profiles: dict[str, dict[str, str]], pages: list[MfoPage]) -> dict[str, Any]:
+    profile = profile_for(obs, profiles)
+    text = f"{obs.video_title} {profile.get('default_angle', '')} {profile.get('mfo_fit', '')}".lower()
+    breakout = min(100, int((obs.breakout_score or 0) * 30))
+    velocity = min(100, int((obs.observed_hourly_growth or obs.total_views_per_hour or 0) / 1000 * 20))
+    freshness = 100 if (obs.age_hours or 999) <= 48 else 70 if (obs.age_hours or 999) <= 168 else 25
+    fit = 80 if "high" in profile.get("mfo_fit", "").lower() else 55 if "medium" in profile.get("mfo_fit", "").lower() else 35
+    story_angle = 75 if any(term in text for term in ("study", "experiment", "injury", "training", "challenge", "genetics", "transformation")) else 35
+    practical = 70 if any(term in text for term in ("training", "workout", "strength", "exercise", "diet", "sleep")) else 35
+    evidence = 45
+    if any(term in text for term in ("medical", "injury", "genetics", "disease", "testosterone")):
+        evidence = 35
+    aus = 35 if "australia" not in text and "australian" not in text else 70
+    effort = 35 if any(term in text for term in ("medical", "injury", "genetics", "transformation")) else 20
+    archive_risk = 100 if exact_source_match(obs, pages) else 60 if find_overlap(obs, pages).score >= 0.35 else 10
+    score = round(
+        fit * 0.20
+        + story_angle * 0.20
+        + practical * 0.15
+        + evidence * 0.15
+        + freshness * 0.10
+        + velocity * 0.08
+        + breakout * 0.05
+        + aus * 0.05
+        - effort * 0.08
+        - archive_risk * 0.35
+    )
+    if story_angle < 50:
+        score = min(score, 45)
+    return {
+        "relative_channel_breakout": round(obs.breakout_score or 0, 2),
+        "observed_hourly_growth": obs.observed_hourly_growth,
+        "absolute_views": obs.view_count,
+        "freshness": freshness,
+        "mfo_audience_fit": fit,
+        "strength_of_story_angle": story_angle,
+        "practical_usefulness": practical,
+        "primary_evidence_quality": evidence,
+        "australian_relevance": aus,
+        "archive_risk": archive_risk,
+        "estimated_production_effort": effort,
+        "score": max(0, min(100, score)),
+    }
+
+
+def summarize_transcript_text(text: str) -> dict[str, Any]:
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    sentences = re.split(r"(?<=[.!?])\s+", cleaned)
+    summary = " ".join(sentences[:3])[:700] if cleaned else ""
+    lower = cleaned.lower()
+    exercises = sorted({term for term in ("bench press", "squat", "deadlift", "pull-up", "push-up", "cardio", "hyrox", "running", "bodybuilding", "calorie", "protein") if term in lower})
+    claims = sorted({term for term in ("genetics", "injury", "transformation", "testosterone", "steroid", "natural", "world record") if term in lower})
+    return {
+        "summary": summary,
+        "people_featured": [],
+        "actual_experiment_or_claim": summary[:240],
+        "specific_exercises_training_methods_or_results": exercises,
+        "unsupported_or_misleading_title_claims": claims,
+        "what_mfo_could_add": "Verify the claims, separate entertainment from evidence, and add practical context for Australian men.",
+    }
+
+
+def srt_to_plain_text(srt_text: str) -> str:
+    entries: list[str] = []
+    seen: set[str] = set()
+    blocks = re.split(r"\n\s*\n", srt_text.replace("\r\n", "\n").replace("\r", "\n"))
+    for block in blocks:
+        lines = []
+        for line in block.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.isdigit() or "-->" in stripped or stripped.upper() == "WEBVTT":
+                continue
+            lines.append(re.sub(r"<[^>]+>", "", stripped))
+        caption = re.sub(r"\s+", " ", " ".join(lines)).strip()
+        if caption and caption.lower() not in seen:
+            seen.add(caption.lower())
+            entries.append(caption)
+    return "\n".join(entries)
+
+
+def enrich_creator_transcript(obs: Observation, lang: str = "en") -> dict[str, Any]:
+    output_dir = Path("/tmp/mfo-scanner-transcripts")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    base_opts = {
+        "outtmpl": str(output_dir / f"{obs.video_id}.%(ext)s"),
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "writesubtitles": True,
+        "writeautomaticsub": True,
+        "subtitleslangs": [lang],
+        "subtitlesformat": "srt/best",
+    }
+    try:
+        with yt_dlp.YoutubeDL(base_opts) as ydl:
+            info = ydl.extract_info(obs.video_url, download=True)
+            available_langs = sorted(set((info.get("subtitles") or {}).keys()) | set((info.get("automatic_captions") or {}).keys()))
+        matches = sorted(output_dir.glob(f"{obs.video_id}.{lang}.*"))
+        subtitle = next((path for path in matches if path.suffix == ".srt"), matches[0] if matches else None)
+        if not subtitle:
+            return {"available": False, "language": lang, "available_languages": available_langs, "warning": "No transcript file was downloaded."}
+        text = srt_to_plain_text(subtitle.read_text(encoding="utf-8", errors="replace"))
+        return {"available": True, "language": lang, "available_languages": available_langs, **summarize_transcript_text(text)}
+    except Exception as exc:
+        return {"available": False, "language": lang, "warning": str(exc)[:300]}
+
+
+def enrich_leading_creator_candidates(rows: list[Observation], limit: int = 3) -> dict[str, dict[str, Any]]:
+    enriched: dict[str, dict[str, Any]] = {}
+    for obs in rows[:limit]:
+        enriched[obs.video_id] = enrich_creator_transcript(obs)
+    return enriched
+
+
 def sort_metric(obs: Observation, baseline_mode: bool) -> tuple[float, float, float]:
     if obs.observed_hourly_growth is None or baseline_mode:
         return (0.0, obs.total_views_per_hour or 0.0, float(obs.view_count))
@@ -1117,6 +1355,15 @@ def sort_metric(obs: Observation, baseline_mode: bool) -> tuple[float, float, fl
         float(obs.views_gained if obs.views_gained is not None else -1),
         obs.observed_hourly_growth or 0.0,
         obs.breakout_score or 0.0,
+    )
+
+
+def editorial_sort_metric(obs: Observation, profiles: dict[str, dict[str, str]], pages: list[MfoPage]) -> tuple[float, float, float]:
+    dimensions = creator_editorial_dimensions(obs, profiles, pages)
+    return (
+        float(dimensions["score"]),
+        float(dimensions["observed_hourly_growth"] or 0),
+        float(dimensions["absolute_views"] or 0),
     )
 
 
@@ -1152,21 +1399,27 @@ def write_report(
             continue
         new_leads.append(obs)
 
-    new_standard = sorted([obs for obs in new_leads if obs.video_type == "standard"], key=lambda obs: sort_metric(obs, baseline_mode), reverse=True)[:10]
-    new_shorts = sorted([obs for obs in new_leads if obs.video_type == "shorts"], key=lambda obs: sort_metric(obs, baseline_mode), reverse=True)[:10]
+    new_standard = sorted([obs for obs in new_leads if obs.video_type == "standard"], key=lambda obs: editorial_sort_metric(obs, profiles, pages), reverse=True)[:10]
+    new_shorts = sorted([obs for obs in new_leads if obs.video_type == "shorts"], key=lambda obs: editorial_sort_metric(obs, profiles, pages), reverse=True)[:10]
     followup_rows = sorted(followups, key=lambda row: sort_metric(row[0], baseline_mode), reverse=True)[:12]
+    transcript_enrichment: dict[str, dict[str, Any]] = {}
+    if mfo_index.get("source") != "fixture":
+        transcript_enrichment = enrich_leading_creator_candidates(new_standard + new_shorts, limit=3)
 
     lines = [
         "# MFO Creator Radar",
         "",
         f"- Scan timestamp: `{scan_timestamp}`",
         f"- Videos observed: `{len(ok)}`",
-        f"- Ranking mode: `{'view growth since previous scheduled scan' if reliable_growth else 'provisional total views/hour; channel baseline pending'}`",
+        f"- Ranking mode: `editorial opportunity score; raw breakout is reported separately`",
         f"- MFO archive index: `{len(pages)} pages` from `{mfo_index.get('source', 'not available')}` refreshed `{mfo_index.get('refreshed_at', 'unknown')}`",
+        f"- Archive source fingerprints: `{mfo_index.get('source_fingerprint_count', 0)}`",
         "",
         "Use this as a lead sheet, not a publishing instruction. Titles are prompts to investigate; they are not facts.",
         "",
     ]
+    if mfo_index.get("archive_warning"):
+        lines.extend([f"**Archive warning:** {mfo_index.get('archive_warning')}", ""])
     lines.extend(section_lines("New Leads - Standard Videos", new_standard, baseline_mode, profiles, pages))
     lines.extend(section_lines("New Leads - Shorts", new_shorts, baseline_mode, profiles, pages))
 
@@ -1201,8 +1454,8 @@ def write_report(
     report_path.write_text("\n".join(lines), encoding="utf-8")
 
     lead_payloads: list[dict[str, Any]] = []
-    lead_payloads.extend(creator_lead_payload(obs, profiles, pages, "new_lead") for obs in new_leads)
-    lead_payloads.extend(creator_lead_payload(obs, profiles, pages, "follow_up") for obs, _overlap in followups)
+    lead_payloads.extend(creator_lead_payload(obs, profiles, pages, "new_lead", transcript_enrichment=transcript_enrichment.get(obs.video_id)) for obs in new_leads)
+    lead_payloads.extend(creator_lead_payload(obs, profiles, pages, "follow_up", transcript_enrichment=transcript_enrichment.get(obs.video_id)) for obs, _overlap in followups)
     lead_payloads.extend(creator_lead_payload(obs, profiles, pages, "already_covered", exact_page=page) for obs, page in covered)
     lead_payloads.extend(creator_lead_payload(obs, profiles, pages, "rejected", rejection_reason=reason) for obs, reason in rejected)
     write_json_payload(
@@ -1217,9 +1470,11 @@ def write_report(
             "errors": errors,
             "metadata": {
                 "videos_observed": len(ok),
-                "ranking_mode": "view growth since previous scheduled scan" if reliable_growth else "provisional total views/hour; channel baseline pending",
+                "ranking_mode": "editorial opportunity score; raw breakout reported separately",
                 "mfo_archive_pages": len(pages),
                 "mfo_archive_refreshed_at": mfo_index.get("refreshed_at"),
+                "mfo_archive_source_fingerprint_count": mfo_index.get("source_fingerprint_count", 0),
+                "mfo_archive_warning": mfo_index.get("archive_warning", ""),
             },
             "leads": lead_payloads,
         },
@@ -1304,7 +1559,26 @@ def is_news_development(item: NewsItem) -> bool:
 
 
 def cluster_key_for(item: NewsItem) -> str:
-    terms = sorted(tokenize(item.title) - NEWS_TERMS)
+    text = f"{item.title} {item.summary}".lower()
+    event_terms = {
+        "crossfit games": "crossfit-games",
+        "hyrox": "hyrox",
+        "alcohol": "alcohol",
+        "meditation": "meditation",
+        "bryan mbeumo": "bryan-mbeumo",
+    }
+    for phrase, key in event_terms.items():
+        if phrase in text:
+            dtype = "results" if any(term in text for term in ("results", "leaderboard", "wins", "won", "crowned", "roundup")) else development_type(NewsCluster(key="", items=[item]))
+            return f"{key}-{dtype}"
+    for doi in extract_dois(text):
+        return f"doi-{doi}"
+    for pmid in extract_pmids(text):
+        return f"pmid-{pmid}"
+    canonical = canonical_url(item.url)
+    if canonical:
+        return re.sub(r"[^a-z0-9]+", "-", canonical.lower()).strip("-")[:80]
+    terms = sorted(tokenize(item.title) - NEWS_TERMS - {"review", "strength", "exercise"})
     return "-".join(terms[:8]) or re.sub(r"\W+", "-", item.title.lower()).strip("-")[:60]
 
 
@@ -1316,7 +1590,10 @@ def cluster_news_items(items: list[NewsItem]) -> list[NewsCluster]:
         best_score = 0.0
         for cluster in clusters:
             cluster_terms = tokenize(" ".join(existing.title for existing in cluster.items))
+            fingerprint_overlap = bool(fingerprints_for_values(item.url, item.title, item.summary) & fingerprints_for_values(*(existing.url for existing in cluster.items), *(existing.title for existing in cluster.items), *(existing.summary for existing in cluster.items)))
             score = len(item_terms & cluster_terms) / max(len(item_terms | cluster_terms), 1)
+            if fingerprint_overlap:
+                score = 1.0
             if score > best_score:
                 best = cluster
                 best_score = score
@@ -1350,9 +1627,25 @@ def first_seen_for(conn: sqlite3.Connection, cluster: NewsCluster, fallback: str
     return row["first_seen"] if row else fallback
 
 
+def source_preference_rank(item: NewsItem) -> int:
+    domain = domain_for(item.url)
+    if "youtube.com" in domain or "youtu.be" in domain:
+        return 4
+    if item.source_type in {"official", "organisation", "journal"}:
+        return 1
+    if item.source_type in {"publicity", "brand"}:
+        return 2
+    if item.source_type == "research_media":
+        return 2
+    if item.source_type in {"rss"} and not any(domain.endswith(press) for press in PRESS_RELEASE_DOMAINS):
+        return 3
+    if item.source_type == "google-news" or "news.google.com" in domain:
+        return 5
+    return 4
+
+
 def primary_news_item(cluster: NewsCluster) -> NewsItem:
-    official = [item for item in cluster.items if item.source_type in {"official", "organisation", "publicity", "journal", "research_media"}]
-    return official[0] if official else cluster.items[0]
+    return sorted(cluster.items, key=lambda item: (source_preference_rank(item), item.published or ""))[0]
 
 
 def independent_domains(cluster: NewsCluster) -> set[str]:
@@ -1652,7 +1945,9 @@ def score_news_cluster(cluster: NewsCluster, pages: list[MfoPage]) -> None:
 
     overlap = find_news_overlap(cluster, pages)
     cluster.overlap = overlap
+    exact_duplicate = False
     if exact_news_source_match(cluster, pages):
+        exact_duplicate = True
         caps.append("exact story already covered: exclude")
         score = -1
         kill_reasons.append("Exact source URL already appears in the MFO archive.")
@@ -1722,7 +2017,7 @@ def score_news_cluster(cluster: NewsCluster, pages: list[MfoPage]) -> None:
             amount_match = re.search(r"-(\d+)", penalty)
             if amount_match:
                 score -= int(amount_match.group(1))
-    final_score = max(min(round(score), 100), 0) if score >= 0 else -1
+    final_score = -1 if exact_duplicate else max(min(round(score), 100), 0)
     if final_score < 40 and not kill_reasons:
         kill_reasons.append("Final score below editorial threshold.")
     confidence = "low" if verify_before_write or true_published_at(cluster) == "unknown" else "medium"
@@ -1737,6 +2032,18 @@ def score_news_cluster(cluster: NewsCluster, pages: list[MfoPage]) -> None:
     cluster.score_json = {
         "final_score": final_score if final_score >= 0 else 0,
         "base_score": base_score,
+        "audience_momentum": news_momentum(cluster),
+        "editorial_opportunity_score": final_score if final_score >= 0 else 0,
+        "editorial_score_breakdown": {
+            "freshness": recency_score(cluster) * 10,
+            "mfo_audience_fit": dimensions["mfo_audience_fit"],
+            "strength_of_story_angle": dimensions["original_value"],
+            "practical_usefulness": dimensions["practical_takeaway"],
+            "primary_evidence_quality": dimensions["evidence_quality"],
+            "australian_relevance": dimensions["australian_relevance"],
+            "archive_risk": 100 if exact_news_source_match(cluster, pages) else 60 if overlap.page and overlap.score >= 0.35 else 10,
+            "estimated_production_effort": 60 if sensitivity == "high" else 35 if is_journal_news_item(cluster) else 25,
+        },
         "caps_applied": caps,
         "penalties_applied": penalties,
         "development_type": dtype,
@@ -1766,10 +2073,11 @@ def score_news_cluster(cluster: NewsCluster, pages: list[MfoPage]) -> None:
 
 
 def exact_news_source_match(cluster: NewsCluster, pages: list[MfoPage]) -> MfoPage | None:
-    urls = {clean_url(item.url) for item in cluster.items}
+    fingerprints = set()
+    for item in cluster.items:
+        fingerprints.update(fingerprints_for_values(item.url, item.title, item.summary))
     for page in pages:
-        page_urls = {clean_url(url) for url in page.source_urls or []}
-        if urls & page_urls:
+        if fingerprints & page_fingerprints(page):
             return page
     return None
 
@@ -1841,6 +2149,9 @@ def news_lead_payload(
             "syndicated_copies": syndicated_count(cluster),
         },
         "scanner_score": score_json.get("final_score", cluster.score),
+        "audience_momentum": score_json.get("audience_momentum", news_momentum(cluster)),
+        "editorial_opportunity_score": score_json.get("editorial_opportunity_score", score_json.get("final_score", cluster.score)),
+        "editorial_score_breakdown": score_json.get("editorial_score_breakdown", {}),
         "score_json": score_json,
         "likely_mfo_angle": score_json.get("original_value_add") or news_angle(cluster),
         "mfo_audience_fit": score_json.get("mfo_audience_fit"),
@@ -1859,6 +2170,7 @@ def news_lead_payload(
             "notes": "Check primary source/publicity assets manually.",
         },
         "evidence_links": [primary.url] + [item.url for item in cluster.items[1:]],
+        "source_fingerprints": sorted({fingerprint for item in cluster.items for fingerprint in fingerprints_for_values(item.url, item.title, item.summary)}),
         "supporting_sources": supporting,
         "status": status,
     }
@@ -1881,12 +2193,15 @@ def write_news_report(clusters: list[NewsCluster], errors: list[str], report_pat
         f"- Scan timestamp: `{seen_at}`",
         f"- News candidates clustered: `{len(clusters)}`",
         f"- MFO archive index: `{len(pages)} pages` from `{mfo_index.get('source', 'not available')}` refreshed `{mfo_index.get('refreshed_at', 'unknown')}`",
+        f"- Archive source fingerprints: `{mfo_index.get('source_fingerprint_count', 0)}`",
         "",
         "Creator popularity is not used here. A candidate needs a new development.",
         "",
         "## Ranked News Leads",
         "",
     ]
+    if mfo_index.get("archive_warning"):
+        lines[6:6] = [f"**Archive warning:** {mfo_index.get('archive_warning')}", ""]
     if not ranked:
         lines.extend(["No ranked news leads found.", ""])
     for index, cluster in enumerate(ranked[:15], 1):
@@ -1962,6 +2277,8 @@ def write_news_report(clusters: list[NewsCluster], errors: list[str], report_pat
                 "clusters": len(clusters),
                 "mfo_archive_pages": len(pages),
                 "mfo_archive_refreshed_at": mfo_index.get("refreshed_at"),
+                "mfo_archive_source_fingerprint_count": mfo_index.get("source_fingerprint_count", 0),
+                "mfo_archive_warning": mfo_index.get("archive_warning", ""),
             },
             "leads": lead_payloads,
         },
@@ -2163,30 +2480,55 @@ def extract_pubmed_articles(xml_text: str, topic_by_pmid: dict[str, str]) -> lis
 def enrich_research_from_text(paper: ResearchPaper) -> None:
     text = paper.abstract or ""
     lower = text.lower()
-    sample = re.search(r"\b(n\s*=\s*[\d,]+|[\d,]+\s+(?:men|women|adults|participants|patients|subjects|athletes))\b", text, re.I)
-    paper.sample_size = sample.group(0) if sample else "not reported in abstract"
-    pop = re.search(r"(?:included|enrolled|randomi[sz]ed|recruited)\s+([^.;]{20,160})", text, re.I)
-    paper.study_population = pop.group(1).strip() if pop else "not reported in abstract"
-    intervention = re.search(r"(?:intervention|assigned to|received|performed)\s+([^.;]{20,180})", text, re.I)
-    paper.intervention = intervention.group(1).strip() if intervention else "not reported in abstract"
-    comparison = re.search(r"(?:compared with|versus|vs\.?|control group)\s+([^.;]{10,140})", text, re.I)
-    paper.comparison = comparison.group(1).strip() if comparison else "not reported in abstract"
-    duration = re.search(r"\b(\d+\s*(?:weeks|months|years|days))\b", text, re.I)
-    paper.duration = duration.group(1) if duration else "not reported in abstract"
+    warnings: list[str] = []
+    sample = re.search(r"\b(?:n\s*=\s*)?([\d]{1,3}(?:,\d{3})+|\d{2,7})\s+(men|women|adults|participants|patients|subjects|athletes|trials|studies)\b", text, re.I)
+    if not sample:
+        sample = re.search(r"\bn\s*=\s*([\d]{1,3}(?:,\d{3})+|\d{2,7})\b", text, re.I)
+    paper.sample_size = f"n = {sample.group(1)}" if sample else None
+    if not sample:
+        warnings.append("sample_size not reliably identified in abstract")
+
+    pop = re.search(r"(?:included|enrolled|randomi[sz]ed|recruited|analysed|analyzed)\s+([\d,]+\s+)?([^.;]{8,140}?(?:men|women|adults|participants|patients|subjects|athletes|trials|studies)[^.;]{0,80})", text, re.I)
+    paper.study_population = re.sub(r"\s+", " ", " ".join(part for part in pop.groups() if part)).strip() if pop else None
+    if not paper.study_population:
+        warnings.append("population not reliably identified in abstract")
+
+    intervention = re.search(r"(?:assigned to|received|performed|underwent|intervention(?:s)? (?:included|was|were)?)\s+([^.;]{8,160})", text, re.I)
+    paper.intervention = intervention.group(1).strip() if intervention else None
+    if not paper.intervention:
+        warnings.append("intervention not reliably identified in abstract")
+
+    comparison = re.search(r"(?:compared with|compared to|versus|vs\.?)\s+([^.;]{5,120})", text, re.I)
+    paper.comparison = comparison.group(1).strip() if comparison else None
+    if not paper.comparison:
+        warnings.append("comparison not reliably identified in abstract")
+
+    duration = re.search(r"\b(?:for|over|during)\s+(\d+(?:\.\d+)?\s*(?:weeks|months|days))\b", text, re.I)
+    paper.duration = duration.group(1) if duration else None
+    if not paper.duration and re.search(r"\b\d+\s*years\b", text, re.I):
+        warnings.append("duration mentions years but may describe age/follow-up; left unknown")
+    elif not paper.duration:
+        warnings.append("duration not reliably identified in abstract")
+
     result_sentence = None
     for sentence in re.split(r"(?<=[.!?])\s+", text):
         if any(term in sentence.lower() for term in ("result", "increased", "decreased", "improved", "reduced", "associated", "significant")):
             result_sentence = sentence.strip()
             break
-    paper.primary_finding = result_sentence or "not reported in abstract"
+    paper.primary_finding = result_sentence or None
+    if not result_sentence:
+        warnings.append("primary finding not reliably identified in abstract")
     effect = re.search(r"(\b\d+(?:\.\d+)?\s*%|\bmean difference[^.;]+|95%\s*CI[^.;]+|p\s*[<=>]\s*0\.\d+)", text, re.I)
-    paper.effect_size = effect.group(0) if effect else "not reported in abstract"
+    paper.effect_size = effect.group(0) if effect else None
+    if not effect:
+        warnings.append("effect size not reliably identified in abstract")
     paper.funding = "commercial or funding information requires full-text/manual check"
     if any(term in lower for term in ("funded by", "supported by", "grant", "sponsor")):
         paper.funding = "funding mentioned in abstract; verify details before writing"
     paper.conflicts = "not reported in abstract"
     if any(term in lower for term in ("conflict of interest", "competing interest", "employee of", "consultant")):
         paper.conflicts = "conflict/competing interest language appears in abstract; verify disclosure"
+    paper.extraction_warnings = warnings
 
 
 def enrich_research_reliable_metadata(paper: ResearchPaper, errors: list[str]) -> None:
@@ -2282,10 +2624,35 @@ def is_specialist_clinical_research(text: str) -> bool:
             "arthroplasty",
             "hematopoietic",
             "oncology",
+            "diabetes care",
+            "healthcare audit",
+            "cardiac rehabilitation text message",
+            "tacs",
+            "transcranial alternating current stimulation",
             "paediatric",
             "pediatric",
         )
     )
+
+
+def research_editorial_category(paper: ResearchPaper) -> str:
+    text = " ".join([paper.title, paper.abstract or "", paper.journal or "", " ".join(paper.publication_types)]).lower()
+    study_type = study_type_for(paper)
+    if study_type == "protocol":
+        return "protocol_without_results"
+    if study_type == "animal_or_cell_study":
+        return "animal_or_laboratory_research"
+    if any(term in text for term in ("secondary analysis", "post hoc", "exploratory")):
+        return "exploratory_secondary_analysis"
+    if any(term in text for term in ("audit", "healthcare utilisation", "healthcare utilization", "care quality", "claims data")):
+        return "geographically_specific_healthcare_audit"
+    if is_specialist_clinical_research(text):
+        return "specialist_clinical_procedure"
+    if has_direct_mfo_research_action(text):
+        return "practical_fitness_finding"
+    if any(term in text for term in ("mortality", "sleep", "cardiovascular", "diabetes", "depression", "alcohol")):
+        return "newsworthy_health_finding"
+    return "academic_noise"
 
 
 def research_age_hours(paper: ResearchPaper) -> float | None:
@@ -2352,6 +2719,7 @@ def score_research_paper(paper: ResearchPaper, pages: list[MfoPage], config: dic
     }
     direct_action = has_direct_mfo_research_action(text)
     specialist_clinical = is_specialist_clinical_research(text)
+    editorial_category = research_editorial_category(paper)
     if direct_action and not specialist_clinical:
         score_breakdown["mfo_audience_relevance"] = 18
     elif direct_action:
@@ -2382,7 +2750,7 @@ def score_research_paper(paper: ResearchPaper, pages: list[MfoPage], config: dic
         "animal_or_cell_study": 3,
         "editorial_commentary_letter": 2,
     }.get(study_type, 8)
-    score_breakdown["practical_importance"] = 13 if direct_action and not specialist_clinical else 7 if direct_action else 4
+    score_breakdown["practical_importance"] = 16 if editorial_category == "practical_fitness_finding" else 10 if editorial_category == "newsworthy_health_finding" else 4
     score_breakdown["novelty"] = 12 if any(term in text for term in ("novel", "first", "unexpected", "challeng", "compared", "new")) else 7
     age = research_age_hours(paper)
     if age is None:
@@ -2425,6 +2793,14 @@ def score_research_paper(paper: ResearchPaper, pages: list[MfoPage], config: dic
         penalties.append("specialist clinical topic with weak MFO action -20")
     if not direct_action:
         penalties.append("no direct MFO training or men's-health action -20")
+    category_caps = {
+        "specialist_clinical_procedure": 52,
+        "exploratory_secondary_analysis": 48,
+        "animal_or_laboratory_research": 35,
+        "protocol_without_results": 35,
+        "geographically_specific_healthcare_audit": 42,
+        "academic_noise": 38,
+    }
     male_application = any(has_phrase(text, term) for term in ("men", "male", "both sexes", "both men and women"))
     if any(term in text for term in ("female lower", "women only", "female participants", "pregnant women", "postmenopausal women")) and not male_application:
         penalties.append("female-only study without clear male-audience application -20")
@@ -2457,6 +2833,8 @@ def score_research_paper(paper: ResearchPaper, pages: list[MfoPage], config: dic
         if match:
             raw_score -= int(match.group(1))
     paper.score = max(0, min(100, round(raw_score)))
+    if editorial_category in category_caps:
+        paper.score = min(paper.score, category_caps[editorial_category])
     if score_breakdown["mfo_audience_relevance"] < 14:
         paper.score = min(paper.score, 49)
     thresholds = config.get("thresholds", {}) if isinstance(config.get("thresholds"), dict) else {}
@@ -2472,6 +2850,17 @@ def score_research_paper(paper: ResearchPaper, pages: list[MfoPage], config: dic
         paper.status = "rejected"
         paper.recommended_status = "reject"
     paper.score_breakdown = score_breakdown
+    paper.score_breakdown["editorial_category_score"] = {
+        "practical_fitness_finding": 20,
+        "newsworthy_health_finding": 13,
+        "useful_service_explainer": 12,
+        "specialist_clinical_procedure": 4,
+        "exploratory_secondary_analysis": 3,
+        "animal_or_laboratory_research": 2,
+        "protocol_without_results": 1,
+        "geographically_specific_healthcare_audit": 2,
+        "academic_noise": 1,
+    }.get(editorial_category, 1)
     paper.penalties = penalties
     reasons = paper.rejection_reasons or []
     if paper.status == "rejected" and not reasons:
@@ -2480,16 +2869,9 @@ def score_research_paper(paper: ResearchPaper, pages: list[MfoPage], config: dic
 
 
 def exact_research_archive_match(paper: ResearchPaper, pages: list[MfoPage]) -> MfoPage | None:
-    identifiers = {clean_url(paper.pubmed_url or ""), clean_url(paper.publisher_url or "")}
-    if paper.doi:
-        identifiers.add(clean_url(f"https://doi.org/{paper.doi}"))
-        identifiers.add(paper.doi.lower())
-    if paper.pmid:
-        identifiers.add(paper.pmid)
-        identifiers.add(f"pubmed.ncbi.nlm.nih.gov/{paper.pmid}")
+    identifiers = fingerprints_for_values(paper.pubmed_url, paper.publisher_url, paper.title, paper.abstract, pmid=paper.pmid, doi=paper.doi)
     for page in pages:
-        content = " ".join([page.url, page.title, page.slug, " ".join(page.source_urls or [])]).lower()
-        if any(identifier and identifier.lower() in content for identifier in identifiers):
+        if identifiers & page_fingerprints(page):
             return page
     return None
 
@@ -2512,6 +2894,7 @@ def research_payload(paper: ResearchPaper) -> dict[str, Any]:
             "pubmed_indexed": paper.indexed_at,
         },
         "study_type": study_type,
+        "research_editorial_category": research_editorial_category(paper),
         "population": paper.study_population,
         "sample_size": paper.sample_size,
         "intervention": paper.intervention,
@@ -2523,6 +2906,9 @@ def research_payload(paper: ResearchPaper) -> dict[str, Any]:
         "limitations": limitations_note(paper),
         "score": paper.score,
         "scanner_score": paper.score,
+        "audience_momentum": (paper.public_interest or {}).get("independent_domains", 0),
+        "editorial_opportunity_score": paper.score,
+        "editorial_score_breakdown": paper.score_breakdown or {},
         "score_breakdown": paper.score_breakdown or {},
         "penalties": paper.penalties or [],
         "commercial_funding_or_disclosure_flags": disclosure_note(paper),
@@ -2532,6 +2918,7 @@ def research_payload(paper: ResearchPaper) -> dict[str, Any]:
         "weakness_or_rejection_reason": "; ".join(paper.rejection_reasons or paper.penalties or []),
         "archive_overlap": overlap_payload(paper.archive_overlap),
         "facts_requiring_manual_verification": facts_to_verify(paper),
+        "extraction_warnings": paper.extraction_warnings or [],
         "imagery": {
             "available": None,
             "notes": "Consider a simple MFO chart/table from reported outcomes; verify rights before using publisher figures.",
@@ -2547,6 +2934,7 @@ def research_payload(paper: ResearchPaper) -> dict[str, Any]:
             "publisher_url": paper.publisher_url,
         },
         "evidence_links": [url for url in [paper.pubmed_url, paper.publisher_url] if url],
+        "source_fingerprints": sorted(fingerprints_for_values(paper.pubmed_url, paper.publisher_url, paper.title, paper.abstract, pmid=paper.pmid, doi=paper.doi)),
         "public_interest": paper.public_interest or {},
         "authors": paper.authors,
         "abstract": paper.abstract,
@@ -2559,7 +2947,7 @@ def research_payload(paper: ResearchPaper) -> dict[str, Any]:
 
 def evidence_strength_note(paper: ResearchPaper) -> str:
     study_type = study_type_for(paper).replace("_", " ")
-    return f"{study_type}; sample size {paper.sample_size or 'not reported in abstract'}; publication types: {', '.join(paper.publication_types) or 'not yet indexed'}."
+    return f"{study_type}; sample size {paper.sample_size or 'unknown from abstract'}; publication types: {', '.join(paper.publication_types) or 'not yet indexed'}."
 
 
 def limitations_note(paper: ResearchPaper) -> str:
@@ -2568,8 +2956,10 @@ def limitations_note(paper: ResearchPaper) -> str:
         notes.append("No abstract available.")
     if "observational" in study_type_for(paper):
         notes.append("Observational design cannot prove causation.")
-    if paper.sample_size == "not reported in abstract":
-        notes.append("Sample size not reported in abstract.")
+    if not paper.sample_size:
+        notes.append("Sample size not reliably reported in abstract.")
+    if paper.extraction_warnings:
+        notes.append("Some abstract fields could not be extracted reliably.")
     if not notes:
         notes.append("Requires full-text review before giving practical advice.")
     return " ".join(notes)
@@ -2592,7 +2982,7 @@ def facts_to_verify(paper: ResearchPaper) -> list[str]:
     facts = ["Confirm full publication date and whether the paper has corrections or retractions.", "Read full text before making practical recommendations."]
     if paper.funding and "verify" in paper.funding.lower():
         facts.append("Verify funding and conflict disclosures.")
-    if paper.effect_size == "not reported in abstract":
+    if not paper.effect_size:
         facts.append("Find exact numerical results in full text.")
     return facts
 
@@ -2612,12 +3002,15 @@ def write_research_report(papers: list[ResearchPaper], errors: list[str], report
         f"- Papers assessed: `{len(papers)}`",
         f"- Viable research leads: `{len(viable)}`",
         f"- MFO archive index: `{len(pages)} pages` refreshed `{mfo_index.get('refreshed_at', 'unknown')}`",
+        f"- Archive source fingerprints: `{mfo_index.get('source_fingerprint_count', 0)}`",
         "",
         "Research Radar is separate from breaking News Radar. A paper is evidence, not a headline.",
         "",
         "## Viable Research Leads",
         "",
     ]
+    if mfo_index.get("archive_warning"):
+        lines[6:6] = [f"**Archive warning:** {mfo_index.get('archive_warning')}", ""]
     if not viable:
         lines.extend(["No viable research leads found.", ""])
     for index, paper in enumerate(viable[:10], 1):
@@ -2655,6 +3048,8 @@ def write_research_report(papers: list[ResearchPaper], errors: list[str], report
             "metadata": {
                 "mfo_archive_pages": len(pages),
                 "mfo_archive_refreshed_at": mfo_index.get("refreshed_at"),
+                "mfo_archive_source_fingerprint_count": mfo_index.get("source_fingerprint_count", 0),
+                "mfo_archive_warning": mfo_index.get("archive_warning", ""),
                 "source": "PubMed E-utilities",
                 "thresholds": config.get("thresholds", {}),
             },
@@ -2798,8 +3193,33 @@ def run_fixture_tests() -> None:
                 "source_urls": ["https://www.youtube.com/watch?v=uN2481h2Ut8"],
                 "youtube_ids": ["uN2481h2Ut8"],
             }
+            ,
+            {
+                "title": "Will Tennyson Rare Genetics Video Already Covered",
+                "url": "https://mensfitnessonline.com.au/will-tennyson-rare-genetics/",
+                "slug": "will-tennyson-rare-genetics",
+                "source_urls": ["https://www.youtube.com/watch?v=s-F1EciASeE"],
+                "youtube_ids": ["s-F1EciASeE"],
+            },
+            {
+                "title": "Meditation And Sleep Paper",
+                "url": "https://mensfitnessonline.com.au/meditation-sleep-paper/",
+                "slug": "meditation-sleep-paper",
+                "source_urls": ["https://pubmed.ncbi.nlm.nih.gov/42576331/", "https://doi.org/10.1000/meditation-sleep"],
+                "youtube_ids": [],
+                "pmids": ["42576331"],
+                "dois": ["10.1000/meditation-sleep"],
+            },
+            {
+                "title": "Generic Exercise Review Page",
+                "url": "https://mensfitnessonline.com.au/generic-exercise-review/",
+                "slug": "generic-exercise-review",
+                "source_urls": [],
+                "youtube_ids": [],
+            },
         ],
     }
+    mfo_index = index_payload(mfo_pages_from_index(mfo_index), MFO_SITE_URL, "fixture")
     profiles = {
         "fixture creator": {
             "category": "fitness challenge influencer",
@@ -2881,11 +3301,29 @@ def run_fixture_tests() -> None:
         short_current = enrich_growth(conn, short_current)
         save_observation(conn, scan2, short_current)
         observations.append(short_current)
+        will_current = Observation(
+            channel_source="fixture creator",
+            channel_name="Will Tennyson",
+            video_title="I Tested Rare Genetics For Muscle Growth",
+            video_url="https://www.youtube.com/watch?v=s-F1EciASeE",
+            video_id="s-F1EciASeE",
+            upload_datetime="2026-08-05T00:00:00Z",
+            view_count=500000,
+            duration_seconds=900,
+            video_type="standard",
+            scan_timestamp=second,
+            age_hours=24.5,
+            total_views_per_hour=20408.0,
+        )
+        will_current = enrich_growth(conn, will_current)
+        save_observation(conn, scan2, will_current)
+        observations.append(will_current)
 
     write_report(observations, [], second, creator_report, profiles, mfo_index)
     creator_text = creator_report.read_text(encoding="utf-8")
     assert "Already Covered And Excluded" in creator_text
     assert "exact source already appears" in creator_text
+    assert "s-F1EciASeE" in creator_text
     assert "insufficient growth interval" in creator_text
     assert "observed 804.0 views/hour" not in creator_text
 
@@ -3034,6 +3472,32 @@ def run_fixture_tests() -> None:
     rss_fixture = """<rss><channel><item><title>Fixture item</title><link>https://example.com/exact-article</link><source url="https://example.com">Example</source><pubDate>Thu, 06 Aug 2026 00:00:00 GMT</pubDate></item></channel></rss>"""
     parsed_items = rss_items_from_xml(rss_fixture, "Fixture", "rss")
     assert parsed_items[0].url == "https://example.com/exact-article"
+    crossfit_clusters = cluster_news_items(
+        [
+            NewsItem("CrossFit Games results roundup day one", "https://example.com/crossfit-results-1", "Example", "2026-08-06T00:00:00Z", "Results roundup from the CrossFit Games.", "rss"),
+            NewsItem("CrossFit Games leaderboard and results roundup", "https://example.org/crossfit-results-2", "Example 2", "2026-08-06T01:00:00Z", "Another result roundup covering the same event.", "rss"),
+        ]
+    )
+    assert len(crossfit_clusters) == 1
+    assert len(crossfit_clusters[0].items) == 2
+    generic_overlap = find_overlap(
+        Observation(
+            channel_source="fixture",
+            channel_name="Fixture",
+            video_title="Strength exercise review",
+            video_url="https://example.com/unrelated",
+            video_id="unrelated",
+            upload_datetime=None,
+            view_count=0,
+            duration_seconds=None,
+            video_type="standard",
+            scan_timestamp=second,
+            age_hours=None,
+            total_views_per_hour=None,
+        ),
+        mfo_pages_from_index(mfo_index),
+    )
+    assert generic_overlap.score == 0
 
     research_report = Path("/tmp/mfo-scanner-research-fixture.md")
     research_config = {
@@ -3064,6 +3528,7 @@ def run_fixture_tests() -> None:
             }
         ],
     }
+    research_index = index_payload(mfo_pages_from_index(research_index) + [page for page in mfo_pages_from_index(mfo_index) if page.pmids], MFO_SITE_URL, "fixture")
     research_papers = [
         ResearchPaper(
             pmid="1001",
@@ -3081,6 +3546,21 @@ def run_fixture_tests() -> None:
             publisher_url="https://doi.org/10.1000/rct",
         ),
         ResearchPaper(
+            pmid="42576331",
+            doi="10.1000/meditation-sleep",
+            topic_group="Sleep, recovery and fatigue",
+            title="Meditation and sleep paper already covered",
+            journal="Sleep Journal",
+            authors=["Fixture J"],
+            abstract="Randomized trial enrolled 180 adults assigned to meditation compared with sleep hygiene for 8 weeks. Results improved sleep quality by 12%.",
+            publication_date=iso(utc_now() - timedelta(days=1)),
+            electronic_publication_date=iso(utc_now() - timedelta(days=1)),
+            indexed_at=iso(utc_now()),
+            publication_types=["Randomized Controlled Trial"],
+            pubmed_url="https://pubmed.ncbi.nlm.nih.gov/42576331/",
+            publisher_url="https://doi.org/10.1000/meditation-sleep",
+        ),
+        ResearchPaper(
             pmid="1002",
             doi="10.1000/review",
             topic_group="Protein, creatine and common sports supplements",
@@ -3094,6 +3574,66 @@ def run_fixture_tests() -> None:
             publication_types=["Systematic Review", "Meta-Analysis"],
             pubmed_url="https://pubmed.ncbi.nlm.nih.gov/1002/",
             publisher_url="https://doi.org/10.1000/review",
+        ),
+        ResearchPaper(
+            pmid="42573645",
+            doi="10.1000/bone-density",
+            topic_group="Resistance training, strength and hypertrophy",
+            title="Optimal Resistance Exercise Strategies for Improving Bone Mineral Density in Middle-Aged and Older Adults: A Network Meta-Analysis Based on Exercise Intensity and Frequency",
+            journal="Calcified Tissue International",
+            authors=["Fixture Bone"],
+            abstract="Systematic review and network meta-analysis included 42 trials and 1,746 adults. Results showed resistance exercise improved bone mineral density compared with control groups.",
+            publication_date=iso(utc_now() - timedelta(days=1)),
+            electronic_publication_date=iso(utc_now() - timedelta(days=1)),
+            indexed_at=iso(utc_now()),
+            publication_types=["Network Meta-Analysis", "Systematic Review"],
+            pubmed_url="https://pubmed.ncbi.nlm.nih.gov/42573645/",
+            publisher_url="https://doi.org/10.1000/bone-density",
+        ),
+        ResearchPaper(
+            pmid="42570001",
+            doi="10.1000/german-diabetes-audit",
+            topic_group="Diabetes, heart health, longevity and physical activity",
+            title="Regional German diabetes care audit of healthcare utilisation",
+            journal="Health Services Research",
+            authors=["Fixture Audit"],
+            abstract="A geographically specific healthcare audit analysed claims data from 312,645 patients in Germany and described diabetes care utilisation.",
+            publication_date=iso(utc_now() - timedelta(days=1)),
+            electronic_publication_date=iso(utc_now() - timedelta(days=1)),
+            indexed_at=iso(utc_now()),
+            publication_types=["Journal Article"],
+            pubmed_url="https://pubmed.ncbi.nlm.nih.gov/42570001/",
+            publisher_url="https://doi.org/10.1000/german-diabetes-audit",
+        ),
+        ResearchPaper(
+            pmid="42570002",
+            doi="10.1000/tacs-review",
+            topic_group="Sleep, recovery and fatigue",
+            title="Transcranial alternating current stimulation review for specialist neurological practice",
+            journal="Clinical Neurophysiology",
+            authors=["Fixture TACS"],
+            abstract="A narrative review summarised tACS protocols for specialist clinical neurophysiology without practical exercise or men's-health decisions.",
+            publication_date=iso(utc_now() - timedelta(days=1)),
+            electronic_publication_date=iso(utc_now() - timedelta(days=1)),
+            indexed_at=iso(utc_now()),
+            publication_types=["Review"],
+            pubmed_url="https://pubmed.ncbi.nlm.nih.gov/42570002/",
+            publisher_url="https://doi.org/10.1000/tacs-review",
+        ),
+        ResearchPaper(
+            pmid="42570003",
+            doi="10.1000/cardiac-text-secondary",
+            topic_group="Diabetes, heart health, longevity and physical activity",
+            title="Secondary analysis of cardiac rehabilitation text-message adherence",
+            journal="Cardiac Digital Health",
+            authors=["Fixture Text"],
+            abstract="A post hoc secondary analysis of cardiac rehabilitation text-message adherence found exploratory associations in a clinical programme.",
+            publication_date=iso(utc_now() - timedelta(days=1)),
+            electronic_publication_date=iso(utc_now() - timedelta(days=1)),
+            indexed_at=iso(utc_now()),
+            publication_types=["Journal Article"],
+            pubmed_url="https://pubmed.ncbi.nlm.nih.gov/42570003/",
+            publisher_url="https://doi.org/10.1000/cardiac-text-secondary",
         ),
         ResearchPaper(
             pmid="1003",
@@ -3211,7 +3751,7 @@ def run_fixture_tests() -> None:
         ),
     ]
     research_papers = dedupe_research_papers(research_papers)
-    assert len(research_papers) == 9
+    assert len(research_papers) == 14
     for paper in research_papers:
         enrich_research_from_text(paper)
     original_news_json_path = globals()["NEWS_JSON_PATH"]
@@ -3226,6 +3766,10 @@ def run_fixture_tests() -> None:
     assert by_id["research:1001"]["public_interest"]["matched"] is True
     assert "sciencedaily.com" in json.dumps(by_id["research:1001"]["public_interest"])
     assert by_id["research:1002"]["status"] == "viable"
+    assert by_id["research:42573645"]["score"] > by_id["research:42570001"]["score"]
+    assert by_id["research:42573645"]["score"] > by_id["research:42570002"]["score"]
+    assert by_id["research:42573645"]["score"] > by_id["research:42570003"]["score"]
+    assert by_id["research:42570001"]["sample_size"] == "n = 312,645"
     assert by_id["research:1003"]["status"] == "rejected"
     assert by_id["research:1004"]["status"] == "rejected"
     assert any("preprint" in item for item in by_id["research:1005"]["penalties"])
@@ -3234,6 +3778,8 @@ def run_fixture_tests() -> None:
     assert by_id["research:1008"]["status"] == "rejected"
     assert by_id["research:1009"]["status"] == "viable"
     assert by_id["research:1009"]["score_breakdown"]["mfo_audience_relevance"] == 20
+    assert by_id["research:42576331"]["status"] == "rejected"
+    assert any("exact MFO archive duplicate" in item for item in by_id["research:42576331"]["penalties"])
     failure_config = Path("/tmp/mfo-scanner-research-failure-config.json")
     failure_config.write_text(
         json.dumps({"topic_groups": [{"name": "Failure", "query": "resistance training"}]}),
@@ -3433,7 +3979,8 @@ def main() -> int:
     profiles = load_source_profiles(args.source_profiles)
     mfo_index: dict[str, Any] = {}
     if not args.skip_mfo_index:
-        mfo_index = load_mfo_index(args.mfo_index, args.mfo_site, refresh=args.refresh_mfo_index)
+        full_scan = not args.skip_creator and not args.skip_news and not args.skip_research
+        mfo_index = load_mfo_index(args.mfo_index, args.mfo_site, refresh=args.refresh_mfo_index or full_scan)
 
     if args.fixture_growth_test:
         insert_fixture_scan(args.db, args.report, profiles, mfo_index)

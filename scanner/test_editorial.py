@@ -9,6 +9,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import main  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import scanner  # noqa: E402
 
 
 def valid_review() -> dict:
@@ -76,6 +78,21 @@ class EditorialDeskTests(unittest.TestCase):
         ok, errors = main.validate_agent_review_payload(valid_review())
         self.assertTrue(ok)
         self.assertEqual(errors, [])
+
+    def test_current_response_importer_stays_backward_compatible(self):
+        review = valid_review()
+        for item in review["reviewed_candidates"]:
+            item["primary_source_url"] = "https://example.com/original"
+        ok, errors = main.validate_agent_review_payload(review)
+        self.assertTrue(ok)
+        self.assertEqual(errors, [])
+
+    def test_bad_primary_source_url_is_reported(self):
+        review = valid_review()
+        review["reviewed_candidates"][0]["primary_source_url"] = ""
+        ok, errors = main.validate_agent_review_payload(review)
+        self.assertFalse(ok)
+        self.assertTrue(any("primary_source_url" in error for error in errors))
 
     def test_malformed_agent_review_reports_useful_errors(self):
         ok, errors = main.validate_agent_review_payload({"recommendations": [{}]})
@@ -238,6 +255,45 @@ class EditorialDeskTests(unittest.TestCase):
                 queue = main.list_production_queue()
                 self.assertEqual(queue["news:test"]["status"], "article_imported")
                 self.assertEqual(queue["news:test"]["source_lead"]["title"], "Test story")
+
+    def test_manual_news_duplicate_keeps_manual_candidate(self):
+        alcohol_url = "https://www.sciencedaily.com/releases/2026/08/260806100000.htm"
+        groups = {
+            "manual": [
+                {
+                    "lead_id": "manual:1",
+                    "scanner_type": "manual",
+                    "title": f"Editor supplied alcohol lead {alcohol_url}",
+                    "source_url": alcohol_url,
+                    "source_fingerprints": [f"url:{main.normalise_packet_url(alcohol_url)}"],
+                    "status": "manual",
+                }
+            ],
+            "news": [
+                {
+                    "lead_id": "news:alcohol",
+                    "scanner_type": "news",
+                    "title": "ScienceDaily alcohol report",
+                    "source_url": alcohol_url,
+                    "source_fingerprints": [f"url:{main.normalise_packet_url(alcohol_url)}"],
+                    "status": "ranked",
+                    "editorial_opportunity_score": 80,
+                }
+            ],
+            "creator": [],
+            "research": [],
+        }
+        deduped, notes = main.dedupe_packet_candidates(groups)
+        self.assertEqual([lead["lead_id"] for lead in deduped["manual"]], ["manual:1"])
+        self.assertEqual(deduped["news"], [])
+        self.assertEqual(notes[0]["merged_lead_id"], "news:alcohol")
+
+    def test_source_fingerprint_helpers_cover_urls_google_youtube_pmid_and_doi(self):
+        google_url = "https://news.google.com/rss/articles/test?url=https%3A%2F%2Fexample.com%2Fstory%3Futm_source%3Dx&oc=5"
+        self.assertEqual(scanner.canonical_url(google_url), "https://example.com/story")
+        self.assertIn("youtube:abc123DEF", scanner.fingerprints_for_values("https://youtu.be/abc123DEF"))
+        self.assertIn("pmid:42576331", scanner.fingerprints_for_values("PMID: 42576331"))
+        self.assertIn("doi:10.1000/example", scanner.fingerprints_for_values("doi:10.1000/example"))
 
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@
           "editorial_rank": { "type": ["integer", "null"], "minimum": 1 },
           "why_editorial_ranking_differs": { "type": "string" },
           "recommended_action": { "type": "string", "enum": ["commission", "hold", "reject"] },
+          "primary_source_url": { "type": "string" },
           "facts_to_check": { "type": "array", "items": { "type": "string" } },
           "notes": { "type": "string" }
         }

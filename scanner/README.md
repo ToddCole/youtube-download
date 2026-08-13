@@ -78,6 +78,8 @@ Creator Radar separates:
 
 If an exact YouTube video ID or source URL already appears in the MFO archive, the candidate is excluded from new leads.
 
+The scanner now stores stable source fingerprints for archive checks and packet deduplication. Creator leads use YouTube video IDs, Research leads use PMID/DOI/PubMed/DOI URLs, and News/Manual leads use canonical source URLs with common redirect/tracking parameters removed. Exact source duplicates are excluded before editorial ranking; generic word overlap such as “review”, “strength” or “exercise” is ignored for archive warnings.
+
 Growth intervals are labelled:
 
 - under one hour: `insufficient growth interval`
@@ -99,6 +101,8 @@ News Radar looks for actual developments: announcements, results, records, docum
 
 ScienceDaily Fitness, Nutrition, Sports Medicine, Diet and Weight Loss, and Dietary Supplements feeds are included as `research_media` sources. These are treated as public-interest alerts, not primary evidence. When a ScienceDaily item can be matched to a PubMed paper by DOI, PMID, exact title or strong title similarity, Research Radar keeps the paper as the primary source and records ScienceDaily as a public-interest signal.
 
+News payloads separate audience momentum from `editorial_opportunity_score`. The score breakdown includes freshness, MFO fit, story angle, practical usefulness, evidence quality, Australian relevance, archive risk and estimated production effort.
+
 ## Research Radar
 
 Research Radar is a separate lane for PubMed papers and writes:
@@ -109,6 +113,8 @@ Research Radar is a separate lane for PubMed papers and writes:
 Configure topic groups, thresholds and penalties in `research_queries.json`. It searches a rolling seven-day PubMed publication window with overlap, stores seen PMIDs/DOIs in `scanner.db`, and keeps the previous successful report if PubMed or enrichment requests fail.
 
 The research configuration includes a strength-and-conditioning topic group and optional journal relevance boosts for highly relevant sports-science journals. These boosts affect MFO audience relevance only; they do not override evidence quality, study design, sample size, limitations or archive overlap.
+
+Research extraction is conservative. If sample, population, intervention, comparison, duration or effect size cannot be identified reliably from the abstract, the JSON field is `null` and `extraction_warnings` explains what was left unknown. Research scoring distinguishes practical fitness findings from specialist clinical procedures, exploratory secondary analyses, protocols, animal/laboratory research, healthcare audits and academic noise.
 
 Run Research Radar alone:
 
@@ -143,6 +149,8 @@ Open `http://127.0.0.1:8090` and use the Editorial Desk section below the downlo
 Phase 1 uses a manual agent adapter. Click `Prepare Agent Review`, copy or download the packet, send it to ChatGPT, Codex or another capable agent, then paste the returned JSON into `Import Agent Review`. The packet includes the top 10 Creator, top 10 News and top 10 Research candidates, plus any manual stories you add in the UI. The permanent supervisor prompt is stored in `editorial_supervisor_prompt.md`; the required response shape is documented in `editorial_supervisor_response.schema.json`.
 
 Imported reviews render a recommended slate at the top, but all supplied candidates remain visible under Creator, News, Research and Manual tabs. The supervisor response must assess every supplied candidate as `Strong`, `Possible` or `Weak`, with an MFO angle, evidence risk and archive-overlap warning. Local `Commission`, `Hold` and `Reject` decisions are saved in `scanner.db` and survive refreshes and app restarts.
+
+Review packets deduplicate candidates across Creator, News, Research and Manual streams using source fingerprints. Manual leads win over scanner leads, primary research/official sources win over secondary reporting, and merged duplicates remain attached as supporting sources. The packet also includes a concise `daily_editorial` section with up to three `commission_now` and three `hold_for_follow_up` candidates; it does not fill these slots with weak material.
 
 Commissioning is an editorial decision only. Commissioned stories move into the local Production Queue, where an editor can:
 
@@ -200,4 +208,11 @@ Run fixture assertions for the current editorial rules:
 
 ```bash
 python3 scanner.py --fixture-tests --skip-mfo-index
+```
+
+The fixture tests cover exact archive-source matches, cross-stream deduplication, CrossFit result clustering, generic-overlap false positives, conservative research extraction and editorial score ordering. For a syntax and unit-test pass:
+
+```bash
+PYTHONPYCACHEPREFIX=/tmp/mfo-pycache python3 -m py_compile scanner.py ../main.py test_editorial.py
+PYTHONPYCACHEPREFIX=/tmp/mfo-pycache python3 -m unittest test_editorial.py
 ```

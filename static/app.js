@@ -195,3 +195,711 @@ function hideError() {
 document.getElementById("url-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") fetchInfo();
 });
+
+let editorialResults = null;
+let reviewPacket = null;
+let lastAgentReview = null;
+let editorialPoll = null;
+let activeLeadTab = "creator";
+let manualStories = [];
+const savingDecisionIds = new Set();
+
+function fmt(value, fallback = "Not available") {
+  if (value === null || value === undefined || value === "") return fallback;
+  return value;
+}
+
+function shortDate(value) {
+  if (!value) return "Not available";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
+function showEditorialError(message) {
+  const el = document.getElementById("editorial-error");
+  el.textContent = message;
+  el.classList.remove("hidden");
+}
+
+function hideEditorialError() {
+  document.getElementById("editorial-error").classList.add("hidden");
+}
+
+async function refreshEditorialResults() {
+  hideEditorialError();
+  try {
+    const res = await fetch("/api/editorial/results");
+    const data = await res.json();
+    if (!res.ok) throw new Error(getErrorMessage(data, "Failed to load editorial results"));
+    editorialResults = data;
+    renderScannerStatus(data.status.creator, "creator-status-card");
+    renderScannerStatus(data.status.news, "news-status-card");
+    renderScannerStatus(data.status.research, "research-status-card");
+    renderLeadInbox(data);
+    renderProductionQueue();
+    manageEditorialPolling(data.status);
+  } catch (e) {
+    showEditorialError(e.message);
+  }
+}
+
+async function runEditorialScan(type) {
+  hideEditorialError();
+  try {
+    const res = await fetch(`/api/editorial/scans/${type}`, { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(getErrorMessage(data, "Failed to start scanner"));
+    await refreshEditorialResults();
+    manageEditorialPolling({ creator: { state: "running" }, news: { state: "running" }, research: { state: "running" } });
+  } catch (e) {
+    showEditorialError(`Failed to save decision: ${e.message}`);
+  }
+}
+
+function manageEditorialPolling(status) {
+  const running = ["creator", "news", "research"].some((key) =>
+    ["queued", "running"].includes(status?.[key]?.state)
+  );
+  if (running && !editorialPoll) {
+    editorialPoll = setInterval(refreshEditorialResults, 2500);
+  } else if (!running && editorialPoll) {
+    clearInterval(editorialPoll);
+    editorialPoll = null;
+  }
+}
+
+function renderScannerStatus(status, targetId) {
+  const el = document.getElementById(targetId);
+  if (!status) {
+    const fallbackName = targetId.includes("research")
+      ? "Research Radar"
+      : targetId.includes("creator")
+        ? "Creator Radar"
+        : "News Radar";
+    el.innerHTML = `
+      <div class="scanner-card-head">
+        <h2>${fallbackName}</h2>
+        <span class="state-pill state-idle">Unavailable</span>
+      </div>
+      <div class="stale-warning">Restart the local app so this scanner lane can load.</div>
+      <dl class="status-grid">
+        <div><dt>Last successful run</dt><dd>Not available</dd></div>
+        <div><dt>Leads</dt><dd>0</dd></div>
+        <div><dt>Viable</dt><dd>0</dd></div>
+        <div><dt>Report timestamp</dt><dd>Not available</dd></div>
+      </dl>
+    `;
+    return;
+  }
+  const stale = status?.stale || {};
+  const state = status?.state || "idle";
+  el.innerHTML = `
+    <div class="scanner-card-head">
+      <h2>${status.scanner_type === "creator" ? "Creator Radar" : status.scanner_type === "research" ? "Research Radar" : "News Radar"}</h2>
+      <span class="state-pill state-${state}">${state}</span>
+    </div>
+    ${stale.warning ? `<div class="stale-warning">${stale.warning}</div>` : ""}
+    ${status.error ? `<div class="status-message error">${escapeHtml(status.error)}</div>` : ""}
+    <dl class="status-grid">
+      <div><dt>Last successful run</dt><dd>${shortDate(status.last_successful_run)}</dd></div>
+      <div><dt>Leads</dt><dd>${status.lead_count || 0}</dd></div>
+      <div><dt>Viable</dt><dd>${status.viable_count || 0}</dd></div>
+      <div><dt>Report timestamp</dt><dd>${shortDate(status.report_timestamp)}</dd></div>
+    </dl>
+  `;
+}
+
+function allLeads(results) {
+  const creator = results?.creator?.leads || [];
+  const news = results?.news?.leads || [];
+  const research = results?.research?.leads || [];
+  return [...creator, ...news, ...research];
+}
+
+function renderLeadInbox(results) {
+  const el = document.getElementById("lead-list");
+  const decisions = results.decisions || {};
+  const leads = leadsForActiveTab(results);
+  const assessments = assessmentMap();
+  if (!leads.length) {
+    el.className = "lead-list empty-state";
+    el.textContent = `No ${activeLeadTab} candidates available yet.`;
+    renderExcluded(results);
+    return;
+  }
+  el.className = "lead-list";
+  el.replaceChildren();
+  leads.forEach((lead, index) => {
+    const decision = decisions[lead.lead_id]?.decision || "";
+    const saving = savingDecisionIds.has(lead.lead_id);
+    const assessment = assessments[lead.lead_id] || null;
+    const card = document.createElement("article");
+    card.className = "lead-card";
+    card.innerHTML = `
+      <div class="lead-meta-row">
+        <span class="source-pill">${escapeHtml(lead.scanner_type || "")}</span>
+        <span>${escapeHtml(lead.source_name || lead.source_category || "Unknown source")}</span>
+        <span>${escapeHtml(lead.status || "")}</span>
+        <span>Raw rank ${escapeHtml(String(lead.raw_scanner_rank || index + 1))}</span>
+        ${lead.scanner_score !== null && lead.scanner_score !== undefined ? `<strong>${lead.scanner_score}</strong>` : ""}
+        ${assessment ? `<span class="rating-pill rating-${escapeAttr(assessment.agent_rating || "Weak")}">${escapeHtml(assessment.agent_rating || "")}</span>` : ""}
+        ${assessment?.editorial_rank ? `<span>Editorial rank ${escapeHtml(String(assessment.editorial_rank))}</span>` : ""}
+        ${decision ? `<span class="decision-pill decision-${escapeAttr(decision)}">${decisionLabel(decision)}</span>` : ""}
+        ${saving ? `<span>Saving...</span>` : ""}
+      </div>
+      <h3>${escapeHtml(lead.title || "Untitled")}</h3>
+      <p>${escapeHtml(lead.likely_mfo_angle || lead.mfo_audience_fit || lead.weakness_or_rejection_reason || "")}</p>
+      ${assessment ? `
+        <dl class="recommendation-grid assessment-grid">
+          <div><dt>Agent reason</dt><dd>${escapeHtml(assessment.concise_reason || "")}</dd></div>
+          <div><dt>MFO angle</dt><dd>${escapeHtml(assessment.mfo_angle || "")}</dd></div>
+          <div><dt>Evidence risk</dt><dd>${escapeHtml(assessment.evidence_risk || "")}</dd></div>
+          <div><dt>Archive warning</dt><dd>${escapeHtml(assessment.archive_overlap_warning || "")}</dd></div>
+          <div><dt>Ranking difference</dt><dd>${escapeHtml(assessment.why_editorial_ranking_differs || "")}</dd></div>
+          <div><dt>Agent action</dt><dd>${escapeHtml(assessment.recommended_action || "")}</dd></div>
+        </dl>
+      ` : `<div class="empty-state compact">No agent assessment imported for this candidate.</div>`}
+      <div class="lead-facts">
+        <span>Published: ${shortDate(lead.published_at)}</span>
+        <span>Discovered: ${shortDate(lead.discovered_at)}</span>
+        <span>Overlap: ${escapeHtml(lead.archive_overlap?.risk || lead.archive_overlap || "none")}</span>
+      </div>
+      <div class="lead-actions">
+        <a class="btn btn-secondary" href="${escapeAttr(lead.source_url || "#")}" target="_blank" rel="noreferrer">Open</a>
+        ${decisionButtons(lead.lead_id, decision, saving)}
+      </div>
+    `;
+    el.appendChild(card);
+  });
+  renderExcluded(results);
+}
+
+function leadsForActiveTab(results) {
+  if (reviewPacket?.packet?.review_candidates?.[activeLeadTab]) {
+    return reviewPacket.packet.review_candidates[activeLeadTab] || [];
+  }
+  const all = activeLeadTab === "manual" ? manualStoryLeadFallbacks() : (results?.[activeLeadTab]?.leads || []);
+  return all.slice(0, 10).map((lead, index) => ({ ...lead, raw_scanner_rank: lead.raw_scanner_rank || index + 1 }));
+}
+
+function manualStoryLeadFallbacks() {
+  return manualStories.map((story, index) => ({
+    lead_id: `manual:${index + 1}`,
+    scanner_type: "manual",
+    source_name: "Editor supplied",
+    title: story.text,
+    source_url: story.url || "",
+    status: "manual",
+    raw_scanner_rank: index + 1,
+    likely_mfo_angle: "Editor-supplied lead. Verify before commissioning.",
+  }));
+}
+
+function setLeadTab(tab) {
+  activeLeadTab = tab;
+  document.querySelectorAll(".tab-button").forEach((button) => {
+    button.classList.toggle("active", button.textContent.toLowerCase() === tab);
+  });
+  if (editorialResults) renderLeadInbox(editorialResults);
+}
+
+function assessmentMap() {
+  const map = {};
+  (lastAgentReview?.reviewed_candidates || []).forEach((item) => {
+    if (item?.lead_id) map[item.lead_id] = item;
+  });
+  return map;
+}
+
+function renderExcluded(results) {
+  const excludedEl = document.getElementById("excluded-list");
+  if (!excludedEl) return;
+  const excluded = reviewPacket?.packet?.excluded_candidates?.[activeLeadTab]
+    || (results?.[activeLeadTab]?.leads || []).filter((lead) =>
+      ["already_covered", "rejected", "skipped"].includes(lead.status)
+    );
+  excludedEl.replaceChildren();
+  if (!excluded.length) {
+    excludedEl.textContent = "No excluded candidates for this lane.";
+    return;
+  }
+  excluded.slice(0, 40).forEach((lead) => {
+    const row = document.createElement("div");
+    row.className = "rejected-row";
+    row.innerHTML = `<strong>${escapeHtml(lead.lead_id || "")}</strong>: ${escapeHtml(lead.title || "")}<br><span>${escapeHtml(lead.weakness_or_rejection_reason || lead.status || "")}</span>`;
+    excludedEl.appendChild(row);
+  });
+}
+
+function setPrepareReviewState(state, message = "") {
+  const button = document.getElementById("prepare-review-btn");
+  const status = document.getElementById("prepare-review-status");
+  if (!button || !status) return;
+  const isLoading = state === "loading";
+  button.disabled = isLoading;
+  button.classList.toggle("btn-loading", isLoading);
+  button.textContent = isLoading ? "Preparing packet..." : "Prepare Agent Review";
+  status.textContent = message;
+  status.classList.toggle("hidden", !message);
+}
+
+async function saveLeadDecision(leadId, decision) {
+  if (savingDecisionIds.has(leadId)) return;
+  hideEditorialError();
+  const previous = editorialResults?.decisions?.[leadId] || null;
+  savingDecisionIds.add(leadId);
+  applyDecisionLocally({ lead_id: leadId, decision, note: previous?.note || "", updated_at: new Date().toISOString() });
+  renderDecisionSurfaces();
+  try {
+    const res = await fetch("/api/editorial/decisions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lead_id: leadId, decision, note: "" }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(getErrorMessage(data, "Failed to save decision"));
+    applyDecisionLocally(data);
+    if (decision === "commission") {
+      applyProductionQueueLocally({
+        lead_id: leadId,
+        status: "commissioned",
+        source_lead: allKnownLeads().find((lead) => lead.lead_id === leadId) || null,
+        assessment: assessmentMap()[leadId] || null,
+        updated_at: data.updated_at,
+      });
+    }
+  } catch (e) {
+    if (previous) {
+      applyDecisionLocally(previous);
+    } else if (editorialResults?.decisions) {
+      delete editorialResults.decisions[leadId];
+    }
+    showEditorialError(e.message);
+  } finally {
+    savingDecisionIds.delete(leadId);
+    renderDecisionSurfaces();
+  }
+}
+
+async function prepareAgentReview() {
+  hideEditorialError();
+  setPrepareReviewState("loading", "Preparing review packet...");
+  try {
+    const res = await fetch("/api/editorial/review-packet", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ manual_stories: manualStories }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(getErrorMessage(data, "Failed to prepare review packet"));
+    reviewPacket = data;
+    document.getElementById("packet-actions").classList.remove("hidden");
+    const creatorCount = data.packet?.review_candidates?.creator?.length || 0;
+    const newsCount = data.packet?.review_candidates?.news?.length || 0;
+    const researchCount = data.packet?.review_candidates?.research?.length || 0;
+    const manualCount = data.packet?.review_candidates?.manual?.length || 0;
+    const summary = `${creatorCount} Creator, ${newsCount} News, ${researchCount} Research and ${manualCount} Manual candidates ready.`;
+    document.getElementById("packet-summary").textContent = summary;
+    setPrepareReviewState("idle", summary);
+    if (editorialResults) renderLeadInbox(editorialResults);
+  } catch (e) {
+    showEditorialError(e.message);
+    setPrepareReviewState("idle", "Packet preparation failed.");
+  } finally {
+    const button = document.getElementById("prepare-review-btn");
+    if (button) button.disabled = false;
+  }
+}
+
+function addManualStory() {
+  const input = document.getElementById("manual-story-input");
+  const text = input.value.trim();
+  if (!text) return;
+  const match = text.match(/https?:\/\/\S+/);
+  manualStories.push({ text, url: match ? match[0].replace(/[).,]$/, "") : "" });
+  input.value = "";
+  renderManualStories();
+  if (activeLeadTab === "manual" && editorialResults) renderLeadInbox(editorialResults);
+}
+
+function renderManualStories() {
+  const el = document.getElementById("manual-story-list");
+  el.replaceChildren();
+  manualStories.forEach((story, index) => {
+    const item = document.createElement("div");
+    item.className = "manual-story-item";
+    item.innerHTML = `<span>${escapeHtml(story.text)}</span><button class="btn btn-secondary" onclick="removeManualStory(${index})">Remove</button>`;
+    el.appendChild(item);
+  });
+}
+
+function removeManualStory(index) {
+  manualStories.splice(index, 1);
+  renderManualStories();
+  if (activeLeadTab === "manual" && editorialResults) renderLeadInbox(editorialResults);
+}
+
+async function copyReviewPacket() {
+  if (!reviewPacket) return;
+  await navigator.clipboard.writeText(reviewPacket.markdown);
+  document.getElementById("packet-summary").textContent = "Packet copied.";
+}
+
+function downloadReviewPacket(format) {
+  if (!reviewPacket) return;
+  const content = format === "json"
+    ? JSON.stringify(reviewPacket.packet, null, 2)
+    : reviewPacket.markdown;
+  const blob = new Blob([content], { type: format === "json" ? "application/json" : "text/markdown" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = format === "json" ? "mfo-review-packet.json" : "mfo-review-packet.md";
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function loadAgentResponseFile(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    document.getElementById("agent-response-input").value = reader.result;
+  };
+  reader.readAsText(file);
+}
+
+async function importAgentReview() {
+  const errorEl = document.getElementById("agent-import-error");
+  errorEl.classList.add("hidden");
+  let parsed;
+  try {
+    parsed = JSON.parse(document.getElementById("agent-response-input").value);
+  } catch (e) {
+    errorEl.textContent = "The pasted response is not valid JSON.";
+    errorEl.classList.remove("hidden");
+    return;
+  }
+  const expectedIds = allPacketCandidates().map((lead) => lead.lead_id).filter(Boolean);
+  if (expectedIds.length) {
+    const reviewedIds = new Set((parsed.reviewed_candidates || []).map((item) => item?.lead_id));
+    const missingIds = expectedIds.filter((leadId) => !reviewedIds.has(leadId));
+    if (missingIds.length) {
+      errorEl.textContent = `The response is missing assessments for ${missingIds.length} supplied candidate(s): ${missingIds.slice(0, 6).join(", ")}${missingIds.length > 6 ? "…" : ""}`;
+      errorEl.classList.remove("hidden");
+      return;
+    }
+  }
+  try {
+    const res = await fetch("/api/editorial/agent-review", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ response: parsed }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(getErrorMessage(data, "Malformed supervisor response"));
+    lastAgentReview = data.response;
+    renderAgentReview(lastAgentReview);
+    renderProductionQueue();
+  } catch (e) {
+    errorEl.textContent = e.message;
+    errorEl.classList.remove("hidden");
+  }
+}
+
+function renderAgentReview(review) {
+  const list = document.getElementById("recommendations-list");
+  const assessments = assessmentMap();
+  const candidates = allPacketCandidates();
+  const candidateMap = Object.fromEntries(candidates.map((lead) => [lead.lead_id, lead]));
+  const recommended = (review.recommended_ids || []).map((leadId) => ({
+    lead: candidateMap[leadId],
+    assessment: assessments[leadId],
+    leadId,
+  }));
+  list.className = recommended.length ? "recommendations-list" : "recommendations-list empty-state";
+  list.replaceChildren();
+  if (!recommended.length) {
+    list.textContent = "No recommended stories in imported review.";
+  }
+  recommended.forEach((item, index) => {
+    const lead = item.lead || {};
+    const rec = item.assessment || {};
+    const decision = editorialResults?.decisions?.[item.leadId]?.decision || "";
+    const saving = savingDecisionIds.has(item.leadId);
+    const card = document.createElement("article");
+    card.className = "recommendation-card";
+    card.innerHTML = `
+      <div class="lead-meta-row">
+        <span class="source-pill">#${escapeHtml(String(index + 1))}</span>
+        <span>${escapeHtml(lead.scanner_type || rec.scanner_type || "")}</span>
+        <span class="rating-pill rating-${escapeAttr(rec.agent_rating || "Possible")}">${escapeHtml(rec.agent_rating || "Possible")}</span>
+        <span>Raw rank ${escapeHtml(String(lead.raw_scanner_rank || ""))}</span>
+        ${decision ? `<span class="decision-pill decision-${escapeAttr(decision)}">${decisionLabel(decision)}</span>` : ""}
+        ${saving ? `<span>Saving...</span>` : ""}
+      </div>
+      <h3>${escapeHtml(lead.title || item.leadId)}</h3>
+      <dl class="recommendation-grid">
+        <div><dt>Reason</dt><dd>${escapeHtml(rec.concise_reason || "")}</dd></div>
+        <div><dt>MFO angle</dt><dd>${escapeHtml(rec.mfo_angle || lead.likely_mfo_angle || "")}</dd></div>
+        <div><dt>Evidence risk</dt><dd>${escapeHtml(rec.evidence_risk || "")}</dd></div>
+        <div><dt>Archive warning</dt><dd>${escapeHtml(rec.archive_overlap_warning || "")}</dd></div>
+        <div><dt>Ranking difference</dt><dd>${escapeHtml(rec.why_editorial_ranking_differs || "")}</dd></div>
+        <div><dt>Action</dt><dd>${escapeHtml(rec.recommended_action || "")}</dd></div>
+      </dl>
+      <div class="lead-actions">
+        ${decisionButtons(item.leadId, decision, saving)}
+      </div>
+    `;
+    list.appendChild(card);
+  });
+
+  if (editorialResults) renderLeadInbox(editorialResults);
+  renderProductionQueue();
+}
+
+function allPacketCandidates() {
+  const grouped = reviewPacket?.packet?.review_candidates || {};
+  return ["creator", "news", "research", "manual"].flatMap((key) => grouped[key] || []);
+}
+
+function allKnownLeads() {
+  const packetLeads = allPacketCandidates();
+  const resultLeads = ["creator", "news", "research"].flatMap((key) => editorialResults?.[key]?.leads || []);
+  const manualLeads = manualStoryLeadFallbacks();
+  const map = new Map();
+  [...packetLeads, ...resultLeads, ...manualLeads].forEach((lead) => {
+    if (lead?.lead_id && !map.has(lead.lead_id)) map.set(lead.lead_id, lead);
+  });
+  return [...map.values()];
+}
+
+function decisionLabel(decision) {
+  return {
+    commission: "Commissioned",
+    hold: "Held",
+    reject: "Rejected",
+  }[decision] || "";
+}
+
+function decisionButtons(leadId, decision, saving) {
+  const disabled = saving ? "disabled" : "";
+  return `
+    <button class="btn ${decision === "commission" ? "btn-primary" : "btn-secondary"}" ${disabled} onclick="saveLeadDecision('${escapeAttr(leadId)}', 'commission')">Commission</button>
+    <button class="btn ${decision === "hold" ? "btn-primary" : "btn-secondary"}" ${disabled} onclick="saveLeadDecision('${escapeAttr(leadId)}', 'hold')">Hold</button>
+    <button class="btn ${decision === "reject" ? "btn-primary" : "btn-secondary"}" ${disabled} onclick="saveLeadDecision('${escapeAttr(leadId)}', 'reject')">Reject</button>
+  `;
+}
+
+function applyDecisionLocally(decision) {
+  if (!editorialResults) editorialResults = {};
+  if (!editorialResults.decisions) editorialResults.decisions = {};
+  editorialResults.decisions[decision.lead_id] = decision;
+}
+
+function applyProductionQueueLocally(item) {
+  if (!editorialResults) editorialResults = {};
+  if (!editorialResults.production_queue) editorialResults.production_queue = {};
+  editorialResults.production_queue[item.lead_id] = {
+    ...(editorialResults.production_queue[item.lead_id] || {}),
+    ...item,
+  };
+}
+
+function renderDecisionSurfaces() {
+  if (lastAgentReview) renderAgentReview(lastAgentReview);
+  if (editorialResults) renderLeadInbox(editorialResults);
+  renderProductionQueue();
+}
+
+function renderProductionQueue() {
+  const list = document.getElementById("production-queue-list");
+  if (!list) return;
+  const decisions = editorialResults?.decisions || {};
+  const queue = editorialResults?.production_queue || {};
+  const leadsById = Object.fromEntries(allKnownLeads().map((lead) => [lead.lead_id, lead]));
+  const commissioned = Object.values(decisions)
+    .filter((item) => item.decision === "commission")
+    .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
+  list.className = commissioned.length ? "lead-list production-queue-list" : "lead-list empty-state";
+  list.replaceChildren();
+  if (!commissioned.length) {
+    list.textContent = "No commissioned stories yet.";
+    return;
+  }
+  commissioned.forEach((item) => {
+    const queueItem = queue[item.lead_id] || {};
+    const lead = queueItem.source_lead || leadsById[item.lead_id] || {};
+    const assessment = queueItem.assessment || assessmentMap()[item.lead_id] || null;
+    const status = queueItem.status || "commissioned";
+    const hasPacket = Boolean(queueItem.writing_packet_markdown);
+    const canDraft = status === "article_imported" || status === "wp_draft_failed";
+    const domId = leadDomId(item.lead_id);
+    const row = document.createElement("article");
+    row.className = "queue-card";
+    row.innerHTML = `
+      <div class="lead-meta-row">
+        <span class="decision-pill decision-commission">${escapeHtml(productionStatusLabel(status))}</span>
+        <span>${escapeHtml(lead.scanner_type || item.lead_id.split(":")[0] || "lead")}</span>
+        <span>${escapeHtml(item.updated_at ? shortDate(item.updated_at) : "")}</span>
+        ${queueItem.wp_yoast_status ? `<span>Yoast: ${escapeHtml(queueItem.wp_yoast_status)}</span>` : ""}
+      </div>
+      <h3>${escapeHtml(lead.title || item.lead_id)}</h3>
+      <p>${escapeHtml(assessment?.mfo_angle || lead.likely_mfo_angle || lead.mfo_audience_fit || "")}</p>
+      ${queueItem.wp_error ? `<div class="status-message error">${escapeHtml(queueItem.wp_error)}</div>` : ""}
+      ${queueItem.wp_draft_url ? `<div class="small-muted">Draft: ${escapeHtml(queueItem.wp_draft_url)}</div>` : ""}
+      ${hasPacket ? `<div class="small-muted">Writing packet prepared.</div>` : ""}
+      <textarea id="article-import-${domId}" class="article-import-input" placeholder="Paste complete article JSON"></textarea>
+      <div class="lead-actions">
+        ${lead.source_url ? `<a class="btn btn-secondary" href="${escapeAttr(lead.source_url)}" target="_blank" rel="noreferrer">Open</a>` : ""}
+        <button class="btn btn-secondary" onclick="prepareWritingPacket('${escapeAttr(item.lead_id)}')">Prepare Writing Packet</button>
+        <button class="btn btn-secondary" ${hasPacket ? "" : "disabled"} onclick="copyWritingPacket('${escapeAttr(item.lead_id)}')">Copy Packet</button>
+        <button class="btn btn-secondary" ${hasPacket ? "" : "disabled"} onclick="downloadWritingPacket('${escapeAttr(item.lead_id)}')">Download Packet</button>
+        <button class="btn btn-primary" onclick="importArticleForLead('${escapeAttr(item.lead_id)}')">Import Article</button>
+        <button class="btn btn-download queue-draft-btn" ${canDraft ? "" : "disabled"} onclick="createWordPressDraft('${escapeAttr(item.lead_id)}')">Create WordPress Draft</button>
+        ${queueItem.wp_edit_url ? `<a class="btn btn-secondary" href="${escapeAttr(queueItem.wp_edit_url)}" target="_blank" rel="noreferrer">Open WP Draft</a>` : ""}
+        ${decisionButtons(item.lead_id, item.decision, savingDecisionIds.has(item.lead_id))}
+      </div>
+    `;
+    list.appendChild(row);
+  });
+}
+
+function leadDomId(leadId) {
+  return String(leadId).replace(/[^a-zA-Z0-9_-]/g, "-");
+}
+
+function productionStatusLabel(status) {
+  return {
+    commissioned: "Commissioned",
+    writing_packet_prepared: "Packet Prepared",
+    article_imported: "Article Imported",
+    wp_draft_created: "WP Draft Created",
+    wp_draft_failed: "WP Draft Failed",
+  }[status] || status;
+}
+
+async function prepareWritingPacket(leadId) {
+  hideEditorialError();
+  const lead = allKnownLeads().find((item) => item.lead_id === leadId) || null;
+  const assessment = assessmentMap()[leadId] || null;
+  try {
+    const res = await fetch(`/api/editorial/production-queue/${encodeURIComponent(leadId)}/writing-packet`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lead, assessment }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(getErrorMessage(data, "Failed to prepare writing packet"));
+    applyProductionQueueLocally({
+      lead_id: leadId,
+      status: data.status,
+      source_lead: lead,
+      assessment,
+      writing_packet: data.packet,
+      writing_packet_markdown: data.packet.markdown,
+      updated_at: new Date().toISOString(),
+    });
+    renderProductionQueue();
+  } catch (e) {
+    showEditorialError(e.message);
+  }
+}
+
+async function copyWritingPacket(leadId) {
+  const markdown = editorialResults?.production_queue?.[leadId]?.writing_packet_markdown;
+  if (!markdown) return;
+  await navigator.clipboard.writeText(markdown);
+}
+
+function downloadWritingPacket(leadId) {
+  const markdown = editorialResults?.production_queue?.[leadId]?.writing_packet_markdown;
+  if (!markdown) return;
+  const blob = new Blob([markdown], { type: "text/markdown" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${leadDomId(leadId)}-writing-packet.md`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+async function importArticleForLead(leadId) {
+  hideEditorialError();
+  const input = document.getElementById(`article-import-${leadDomId(leadId)}`);
+  let article;
+  try {
+    article = JSON.parse(input.value);
+  } catch (e) {
+    showEditorialError("The pasted article is not valid JSON.");
+    return;
+  }
+  const lead = allKnownLeads().find((item) => item.lead_id === leadId) || null;
+  const assessment = assessmentMap()[leadId] || null;
+  try {
+    const res = await fetch(`/api/editorial/production-queue/${encodeURIComponent(leadId)}/article`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ article, lead, assessment }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(getErrorMessage(data, "Failed to import article"));
+    applyProductionQueueLocally({
+      lead_id: leadId,
+      status: data.status,
+      source_lead: lead,
+      assessment,
+      article: data.article,
+      headline: data.article.headline,
+      slug: data.article.slug,
+      updated_at: new Date().toISOString(),
+    });
+    input.value = "";
+    renderProductionQueue();
+  } catch (e) {
+    showEditorialError(e.message);
+  }
+}
+
+async function createWordPressDraft(leadId) {
+  hideEditorialError();
+  try {
+    const res = await fetch(`/api/editorial/production-queue/${encodeURIComponent(leadId)}/wp-draft`, { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(getErrorMessage(data, "Failed to create WordPress draft"));
+    applyProductionQueueLocally({
+      lead_id: leadId,
+      status: data.status,
+      wp_draft_id: data.wp_draft_id,
+      wp_draft_url: data.wp_draft_url,
+      wp_edit_url: data.wp_edit_url,
+      wp_yoast_status: data.wp_yoast_status,
+      wp_error: "",
+      updated_at: new Date().toISOString(),
+    });
+    renderProductionQueue();
+  } catch (e) {
+    showEditorialError(e.message);
+    await refreshEditorialResults();
+  }
+}
+
+function formatArray(value) {
+  return Array.isArray(value) ? value.join(", ") : (value || "");
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value).replaceAll("`", "&#096;");
+}
+
+refreshEditorialResults();

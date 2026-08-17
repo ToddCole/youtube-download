@@ -1,0 +1,107 @@
+{
+  "https://www.youtube.com/@vladimirfitness/videos": {
+    "category": "viral strength influencer",
+    "mfo_fit": "High when traction is strong",
+    "default_angle": "Check what actually happened in the stunt and explain the strength lesson without treating the title as fact.",
+    "default_value_add": "Verify the claim against the transcript, convert any imperial loads to kg, and link to existing Anatoly background only when the search intent is distinct.",
+    "default_weakness": "Anatoly coverage can easily cannibalise existing MFO pages unless the angle is tightly differentiated."
+  },
+  "https://www.youtube.com/@WillTennyson/videos": {
+    "category": "fitness influencer experiment",
+    "mfo_fit": "High",
+    "default_angle": "Pull out the useful training, diet or lifestyle experiment and turn it into a practical Australian male reader takeaway.",
+    "default_value_add": "Separate entertainment from advice, add realistic modifications for men 35-65, and flag anything that should not be copied blindly.",
+    "default_weakness": "Some videos are personality-led and may not produce a durable search or social hook."
+  },
+  "https://www.youtube.com/@Browney/videos": {
+    "category": "fitness challenge influencer",
+    "mfo_fit": "Medium to high",
+    "default_angle": "Use the challenge as a hook for performance standards, training lessons or athlete context.",
+    "default_value_add": "Explain what the challenge does and does not prove, with practical benchmarks where appropriate.",
+    "default_weakness": "Challenge content can be thin unless there is a recognisable guest, big traction or a useful training angle."
+  },
+  "https://www.youtube.com/@RenaissancePeriodization/videos": {
+    "category": "training explainer",
+    "mfo_fit": "High",
+    "default_angle": "Translate the training argument into clear gym advice for Australian men without overstating the evidence.",
+    "default_value_add": "Add practical programming context, caveats for older lifters and plain-English explanation.",
+    "default_weakness": "Can become too clinical if there is no strong audience-demand signal."
+  },
+  "https://www.youtube.com/@JeffNippard/videos": {
+    "category": "science-based training explainer",
+    "mfo_fit": "High",
+    "default_angle": "Extract the evidence-backed training claim and turn it into a useful explainer with caveats.",
+    "default_value_add": "Clarify the study strength, practical application, kg/cm examples and limits for general readers.",
+    "default_weakness": "Needs careful attribution and should not overstate scientific certainty."
+  },
+  "https://www.youtube.com/@JeremyEthier/videos": {
+    "category": "training and nutrition explainer",
+    "mfo_fit": "High",
+    "default_angle": "Convert the explainer into a practical routine, checklist or decision guide.",
+    "default_value_add": "Add Australian context, realistic substitutions and advice for men 35-65.",
+    "default_weakness": "May be too evergreen unless the video is clearly outperforming."
+  },
+  "https://www.youtube.com/@hyroxworld/videos": {
+    "category": "HYROX competition",
+    "mfo_fit": "High",
+    "default_angle": "Identify the competition or training development and explain why Australian functional fitness readers should care.",
+    "default_value_add": "Add event context, athlete stakes, Australian relevance and practical HYROX training takeaways.",
+    "default_weakness": "Official videos may have modest raw views, so the hook needs event relevance or search value."
+  },
+  "https://www.youtube.com/@CrossFitGamesTV/videos": {
+    "category": "CrossFit competition",
+    "mfo_fit": "High when event stakes are clear",
+    "default_angle": "Use competition developments to explain athlete performance, event format or training implications.",
+    "default_value_add": "Add context for Australian readers, explain the stakes and avoid assuming prior CrossFit knowledge.",
+    "default_weakness": "Niche unless tied to a major athlete, Games development or practical training lesson."
+  },
+  "https://www.youtube.com/@CrossFit/videos": {
+    "category": "CrossFit training and competition",
+    "mfo_fit": "Medium to high",
+    "default_angle": "Look for useful training lessons, event news or broad functional-fitness hooks.",
+    "default_value_add": "Explain movements, scaling and relevance for everyday gym users.",
+    "default_weakness": "Brand-channel videos can be promotional or too insider-focused."
+  },
+  "https://www.youtube.com/@athleanx/videos": {
+    "category": "training explainer",
+    "mfo_fit": "Medium to high",
+    "default_angle": "Turn the exercise claim into a practical form, programming or injury-risk explainer.",
+    "default_value_add": "Add caveats, alternatives and age-appropriate modifications.",
+    "default_weakness": "Highly evergreen and competitive search space; needs a sharp distinct intent."
+  },
+  "https://www.youtube.com/@SquatUniversity/videos": {
+    "category": "mobility and injury explainer",
+    "mfo_fit": "Medium",
+    "default_angle": "Use the clip as a prompt for practical movement, mobility or pain-context advice.",
+    "default_value_add": "Add clear medical caveats, when to see a professional and sensible exercise modifications.",
+    "default_weakness": "Risk of clinical dullness or medical overreach if the news hook is weak."
+  },
+  "https://www.youtube.com/@GarageStrength/videos": {
+    "category": "strength training explainer",
+    "mfo_fit": "Medium",
+    "default_angle": "Extract a strength or athletic-development lesson that general lifters can use.",
+    "default_value_add": "Translate coaching detail into simple programming advice and realistic standards.",
+    "default_weakness": "Can be too technical or coach-specific for a broader MFO audience."
+  },
+  "https://www.youtube.com/@MarkBellsPowerProject/videos": {
+    "category": "strength interview",
+    "mfo_fit": "Medium",
+    "default_angle": "Look for a strong quote, training claim or recognised guest with broader relevance.",
+    "default_value_add": "Verify the claim, provide context and avoid making the article a transcript rewrite.",
+    "default_weakness": "Long interview clips need a clear news peg or practical takeaway."
+  },
+  "https://www.youtube.com/@MorePlatesMoreDates/videos": {
+    "category": "fitness culture and performance drugs",
+    "mfo_fit": "Selective",
+    "default_angle": "Use only when there is a strong public-interest hook around fitness culture, supplements or performance claims.",
+    "default_value_add": "Add careful attribution, Australian context and safety caveats for disputed or medical-adjacent claims.",
+    "default_weakness": "High risk of sensitive claims, speculation or audience mismatch."
+  },
+  "https://www.youtube.com/@gregdoucette/videos": {
+    "category": "fitness culture and nutrition commentary",
+    "mfo_fit": "Selective",
+    "default_angle": "Use only when the story has broad fitness-culture relevance or a useful diet/training corrective.",
+    "default_value_add": "Separate commentary from fact and add a practical, less inflammatory MFO take.",
+    "default_weakness": "Can be personality drama rather than useful fitness news."
+  }
+}

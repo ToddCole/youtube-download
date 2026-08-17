@@ -27,6 +27,8 @@ from xml.etree import ElementTree
 
 import yt_dlp
 
+import editorial_gates
+
 
 BASE_DIR = Path(__file__).resolve().parent
 CHANNELS_PATH = BASE_DIR / "channels.json"
@@ -42,6 +44,19 @@ RESEARCH_JSON_PATH = BASE_DIR / "reports" / "research-latest.json"
 NEWS_SOURCES_PATH = BASE_DIR / "news_sources.json"
 NEWS_QUERIES_PATH = BASE_DIR / "news_queries.json"
 RESEARCH_QUERIES_PATH = BASE_DIR / "research_queries.json"
+EDITORIAL_GATES_CONFIG_PATH = BASE_DIR / "editorial_gates_config.json"
+_GATES_CONFIG_CACHE: dict[str, Any] | None = None
+
+
+def gates_config() -> dict[str, Any]:
+    """Process-wide cached editorial_gates config; avoids re-reading the
+    config file on every development_type()/find_overlap() call."""
+    global _GATES_CONFIG_CACHE
+    if _GATES_CONFIG_CACHE is None:
+        _GATES_CONFIG_CACHE = editorial_gates.load_config(EDITORIAL_GATES_CONFIG_PATH)
+    return _GATES_CONFIG_CACHE
+
+
 VIDEOS_PER_CHANNEL = 5
 SHORTS_MAX_SECONDS = 180
 MFO_SITE_URL = "https://mensfitnessonline.com.au"
@@ -83,26 +98,28 @@ STOPWORDS = {
     "you",
     "your",
 }
-OVERLAP_STOPWORDS = STOPWORDS | {
-    "2024",
-    "2025",
-    "2026",
-    "fitness",
-    "health",
-    "journal",
-    "media",
-    "men",
-    "muscle",
-    "new",
-    "release",
-    "review",
-    "research",
-    "science",
-    "study",
-    "training",
-    "strength",
-    "exercise",
-}
+OVERLAP_STOPWORDS = (
+    STOPWORDS
+    | editorial_gates.recent_years()
+    | {
+        "fitness",
+        "health",
+        "journal",
+        "media",
+        "men",
+        "muscle",
+        "new",
+        "release",
+        "review",
+        "research",
+        "science",
+        "study",
+        "training",
+        "strength",
+        "exercise",
+    }
+    | set(gates_config().get("overlap_stopwords_extra", []))
+)
 YOUTUBE_ID_RE = re.compile(
     r"(?:youtube\.com/(?:watch\?v=|embed/|shorts/)|youtu\.be/)([A-Za-z0-9_-]{6,})"
 )
@@ -203,6 +220,9 @@ class Observation:
     views_gained: int | None = None
     observed_hourly_growth: float | None = None
     breakout_score: float | None = None
+    breakout_confidence: str = "pending"
+    breakout_comparison_count: int = 0
+    breakout_expected_views_at_current_age: float | None = None
     comparison_hours: float | None = None
     growth_signal: str = "baseline pending"
     status: str = "ok"
@@ -221,6 +241,7 @@ class MfoPage:
     pmids: list[str] | None = None
     dois: list[str] | None = None
     source_fingerprints: list[str] | None = None
+    primary_creator_key: str | None = None
 
 
 @dataclass
@@ -391,7 +412,13 @@ def profile_for(obs: Observation, profiles: dict[str, dict[str, str]]) -> dict[s
     return {
         "category": "fitness lead",
         "mfo_fit": "Needs editor review",
-        "default_angle": "Assess whether the source claim is useful, true and practical for Australian men 35-65.",
+        # Deliberately avoids the literal words "Australia"/"Australian": this
+        # boilerplate is applied to every unprofiled channel, and several
+        # scoring/eligibility checks look for those words in the combined
+        # title+profile text as a signal of genuine Australian relevance —
+        # baking them into generic fallback copy would make every unprofiled
+        # candidate falsely register as strongly Australia-relevant.
+        "default_angle": "Assess whether the source claim is useful, true and practical for this MFO audience (men 35-65).",
         "default_value_add": "Add context, verification, practical takeaways and clear caveats.",
         "default_weakness": "Audience demand or local relevance may be too thin once the video is checked.",
     }
@@ -545,7 +572,7 @@ def index_payload(pages: list[MfoPage], site_url: str, source: str) -> dict[str,
     }
 
 
-def fetch_wordpress_posts(site_url: str) -> list[MfoPage]:
+def fetch_wordpress_posts(site_url: str, creator_lexicon: dict[str, list[str]] | None = None) -> list[MfoPage]:
     pages: list[MfoPage] = []
     total_pages: int | None = None
     page_num = 1
@@ -587,6 +614,9 @@ def fetch_wordpress_posts(site_url: str) -> list[MfoPage]:
                         youtube_ids=extract_youtube_ids(content),
                         pmids=extract_pmids(searchable),
                         dois=extract_dois(searchable),
+                        primary_creator_key=editorial_gates.match_creator_in_text(
+                            strip_html(f"{rendered} {content}"), creator_lexicon
+                        ) if creator_lexicon else None,
                     )
                 )
         page_num += 1
@@ -627,9 +657,9 @@ def fetch_sitemap_posts(site_url: str, max_sitemaps: int = 12) -> list[MfoPage]:
     return pages
 
 
-def refresh_mfo_index(site_url: str, index_path: Path) -> dict[str, Any]:
+def refresh_mfo_index(site_url: str, index_path: Path, creator_lexicon: dict[str, list[str]] | None = None) -> dict[str, Any]:
     try:
-        pages = fetch_wordpress_posts(site_url)
+        pages = fetch_wordpress_posts(site_url, creator_lexicon)
         source = "wordpress-rest"
     except Exception:
         pages = fetch_sitemap_posts(site_url)
@@ -639,10 +669,10 @@ def refresh_mfo_index(site_url: str, index_path: Path) -> dict[str, Any]:
     return payload
 
 
-def load_mfo_index(index_path: Path, site_url: str, refresh: bool = False) -> dict[str, Any]:
+def load_mfo_index(index_path: Path, site_url: str, refresh: bool = False, creator_lexicon: dict[str, list[str]] | None = None) -> dict[str, Any]:
     if refresh or not index_path.exists():
         try:
-            return refresh_mfo_index(site_url, index_path)
+            return refresh_mfo_index(site_url, index_path, creator_lexicon)
         except (URLError, TimeoutError, OSError, ValueError) as exc:
             print(f"Warning: could not refresh MFO index: {exc}", file=sys.stderr)
             return {
@@ -662,7 +692,7 @@ def load_mfo_index(index_path: Path, site_url: str, refresh: bool = False) -> di
     refreshed = parse_dt(payload.get("refreshed_at"))
     if refreshed and utc_now() - refreshed > timedelta(hours=MFO_INDEX_MAX_AGE_HOURS):
         try:
-            return refresh_mfo_index(site_url, index_path)
+            return refresh_mfo_index(site_url, index_path, creator_lexicon)
         except (URLError, TimeoutError, OSError, ValueError) as exc:
             print(f"Warning: using stale MFO index after refresh failed: {exc}", file=sys.stderr)
             payload["archive_warning"] = f"Using cached MFO archive after refresh failed: {exc}"
@@ -700,9 +730,33 @@ def mfo_pages_from_index(index: dict[str, Any]) -> list[MfoPage]:
                     pmids=[str(pmid) for pmid in item.get("pmids", []) if isinstance(pmid, str)],
                     dois=[str(doi) for doi in item.get("dois", []) if isinstance(doi, str)],
                     source_fingerprints=[str(fingerprint) for fingerprint in item.get("source_fingerprints", []) if isinstance(fingerprint, str)],
+                    primary_creator_key=item.get("primary_creator_key") if isinstance(item.get("primary_creator_key"), str) else None,
                 )
             )
     return pages
+
+
+def sync_publication_history(conn: sqlite3.Connection, pages: list[MfoPage]) -> int:
+    """Populate publication_history from the MFO archive index's resolved
+    primary_creator_key per page. Only scanner.py writes this table (see
+    editorial_gates' disjoint-writer design); main.py writes
+    commission_history separately. Returns the number of pages with a
+    resolved creator attribution."""
+    synced = 0
+    with conn:
+        for page in pages:
+            if not page.primary_creator_key:
+                continue
+            editorial_gates.record_publication_history(
+                conn,
+                page_url=page.url,
+                creator_key=page.primary_creator_key,
+                creator_display_name=page.primary_creator_key.replace("_", " ").title(),
+                published_at=page.date,
+                format_=None,
+            )
+            synced += 1
+    return synced
 
 
 def exact_source_match(obs: Observation, pages: list[MfoPage]) -> MfoPage | None:
@@ -716,18 +770,26 @@ def exact_source_match(obs: Observation, pages: list[MfoPage]) -> MfoPage | None
 
 
 def find_overlap(obs: Observation, pages: list[MfoPage]) -> Overlap:
-    candidate_terms = tokenize(f"{obs.channel_name} {obs.video_title}") - OVERLAP_STOPWORDS
+    config = gates_config()
+    candidate_text = f"{obs.channel_name} {obs.video_title}"
+    candidate_terms = tokenize(candidate_text) - OVERLAP_STOPWORDS
     best = Overlap(score=0.0, page=None, shared_terms=[])
     if not candidate_terms:
         return best
+    # Entity-weighted, not plain shared/total: two short titles sharing a
+    # few generic content words (e.g. "diet"/"loss"/"weight") can otherwise
+    # produce a high fractional score purely from title brevity, with no
+    # named entity/event in common. This is the same weighting
+    # topic_overlap_breakdown() uses — kept in sync so the archive_overlap/
+    # cannibalisation_risk fields an editor actually sees (and the penalty
+    # this function's score drives in score_news_cluster()) reflect it too,
+    # not just an additive side field nobody's decision depends on.
+    entity_terms = editorial_gates.entity_terms_for_text(candidate_text, config)
     for page in pages:
         page_terms = tokenize(f"{page.title} {page.slug}") - OVERLAP_STOPWORDS
-        shared = sorted(candidate_terms & page_terms)
-        if not shared:
-            continue
-        score = len(shared) / max(len(candidate_terms), 1)
-        if score > best.score:
-            best = Overlap(score=score, page=page, shared_terms=shared)
+        result = editorial_gates.weighted_topic_overlap(candidate_terms, page_terms, config, entity_terms=entity_terms)
+        if result["score"] > best.score:
+            best = Overlap(score=result["score"], page=page, shared_terms=result["shared_terms"])
     return best
 
 
@@ -804,6 +866,7 @@ def connect_db(path: Path) -> sqlite3.Connection:
     ensure_column(conn, "scans", "scan_kind", "TEXT NOT NULL DEFAULT 'scheduled'")
     ensure_column(conn, "observations", "comparison_hours", "REAL")
     ensure_column(conn, "observations", "growth_signal", "TEXT NOT NULL DEFAULT 'baseline pending'")
+    editorial_gates.ensure_saturation_tables(conn)
     return conn
 
 
@@ -944,11 +1007,27 @@ def previous_observation(conn: sqlite3.Connection, video_id: str, scan_timestamp
 
 
 def channel_baseline(
-    conn: sqlite3.Connection, channel_name: str, video_type: str, scan_timestamp: str
-) -> float | None:
+    conn: sqlite3.Connection,
+    channel_name: str,
+    video_type: str,
+    scan_timestamp: str,
+    age_hours: float | None = None,
+    config: dict[str, Any] | None = None,
+) -> tuple[float | None, str, int]:
+    """Median hourly-growth baseline for a channel, bounded to the most
+    recent comparison_window observations and, when age_hours is known,
+    restricted to observations measured at a comparable point in a
+    video's lifecycle. Returns (baseline, confidence, comparison_count)
+    rather than just a number, so callers can refuse to treat a
+    thin/absent baseline as equivalent to a well-established one."""
+    config = config or gates_config()
+    breakout_config = config.get("breakout_confidence", {})
+    window = int(breakout_config.get("comparison_window", 20))
+    tolerance = float(breakout_config.get("age_match_tolerance_hours", 12))
+
     rows = conn.execute(
         """
-        SELECT observed_hourly_growth
+        SELECT observed_hourly_growth, age_hours
         FROM observations
         WHERE channel_name = ?
           AND video_type = ?
@@ -956,11 +1035,24 @@ def channel_baseline(
           AND observed_hourly_growth IS NOT NULL
           AND observed_hourly_growth > 0
           AND status = 'ok'
+        ORDER BY scan_timestamp DESC
+        LIMIT ?
         """,
-        (channel_name, video_type, scan_timestamp),
+        (channel_name, video_type, scan_timestamp, window),
     ).fetchall()
-    values = [float(row["observed_hourly_growth"]) for row in rows]
-    return median(values) if values else None
+
+    if age_hours is not None:
+        matched = [row for row in rows if row["age_hours"] is not None and abs(float(row["age_hours"]) - age_hours) <= tolerance]
+        # Fall back to the unfiltered window if age-matching leaves too few
+        # rows to be meaningful, rather than silently treating "no exact
+        # age match" as "no baseline at all".
+        candidate_rows = matched if len(matched) >= 1 else rows
+    else:
+        candidate_rows = rows
+
+    values = [float(row["observed_hourly_growth"]) for row in candidate_rows]
+    confidence = editorial_gates.breakout_confidence_tier(len(values), config)
+    return (median(values) if values else None), confidence, len(values)
 
 
 def enrich_growth(conn: sqlite3.Connection, obs: Observation) -> Observation:
@@ -986,7 +1078,11 @@ def enrich_growth(conn: sqlite3.Connection, obs: Observation) -> Observation:
     else:
         obs.growth_signal = "baseline pending"
 
-    baseline = channel_baseline(conn, obs.channel_name, obs.video_type, obs.scan_timestamp)
+    baseline, confidence, comparison_count = channel_baseline(conn, obs.channel_name, obs.video_type, obs.scan_timestamp, obs.age_hours)
+    obs.breakout_confidence = confidence
+    obs.breakout_comparison_count = comparison_count
+    if baseline and obs.age_hours is not None:
+        obs.breakout_expected_views_at_current_age = round(baseline * obs.age_hours, 1)
     if baseline and obs.observed_hourly_growth is not None:
         obs.breakout_score = obs.observed_hourly_growth / baseline
     return obs
@@ -1104,6 +1200,69 @@ def mfo_page_payload(page: MfoPage | None) -> dict[str, Any] | None:
     }
 
 
+def topic_overlap_breakdown(
+    candidate_text: str,
+    pages: list[MfoPage],
+    exact_page: MfoPage | None,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Entity/topic-weighted archive overlap, additive alongside the
+    existing lexical Overlap/archive_overlap fields. Distinguishes:
+    - source_overlap: exact-fingerprint duplicate (same underlying source)
+    - topic_overlap: weighted term overlap with named entities weighted
+      higher than generic fitness vocabulary
+    - search_intent_overlap: other MFO pages sharing the same broad topic
+      bucket, regardless of exact wording
+    - cannibalisation_risk: none|low|medium|high|exact, derived from the
+      above rather than raw lexical overlap alone
+    """
+    config = config or gates_config()
+    candidate_terms = tokenize(candidate_text) - OVERLAP_STOPWORDS
+    entity_terms = editorial_gates.entity_terms_for_text(candidate_text, config)
+    best: dict[str, Any] = {"score": 0.0, "shared_terms": [], "shared_entity_terms": [], "page": None}
+    for page in pages:
+        page_terms = tokenize(f"{page.title} {page.slug}") - OVERLAP_STOPWORDS
+        result = editorial_gates.weighted_topic_overlap(candidate_terms, page_terms, config, entity_terms=entity_terms)
+        if result["score"] > best["score"]:
+            best = {**result, "page": page}
+
+    broad_topic = editorial_gates.broad_topic_for(candidate_text, config)
+    search_intent_matches: list[dict[str, str]] = []
+    if broad_topic:
+        for page in pages:
+            if page is exact_page:
+                continue
+            if editorial_gates.broad_topic_for(f"{page.title} {page.slug}", config) == broad_topic:
+                search_intent_matches.append({"title": page.title, "url": page.url})
+
+    thresholds = config.get("cannibalisation_thresholds", {})
+    high_score = float(thresholds.get("high_score", 0.4))
+    medium_score = float(thresholds.get("medium_score", 0.35))
+    if exact_page:
+        cannibalisation_risk = "exact"
+    elif best["shared_entity_terms"] and best["score"] >= high_score:
+        cannibalisation_risk = "high"
+    elif best["shared_entity_terms"] or best["score"] >= medium_score:
+        cannibalisation_risk = "medium"
+    elif best["score"] > 0:
+        cannibalisation_risk = "low"
+    else:
+        cannibalisation_risk = "none"
+
+    return {
+        "source_overlap": [{"title": exact_page.title, "url": exact_page.url}] if exact_page else [],
+        "topic_overlap": {
+            "score": best["score"],
+            "shared_terms": best.get("shared_terms", []),
+            "shared_entity_terms": best.get("shared_entity_terms", []),
+            "page": mfo_page_payload(best.get("page")),
+        },
+        "search_intent_overlap": search_intent_matches[:5],
+        "cannibalisation_risk": cannibalisation_risk,
+        "broad_topic": broad_topic,
+    }
+
+
 def creator_lead_payload(
     obs: Observation,
     profiles: dict[str, dict[str, str]],
@@ -1112,10 +1271,21 @@ def creator_lead_payload(
     rejection_reason: str | None = None,
     exact_page: MfoPage | None = None,
     transcript_enrichment: dict[str, Any] | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
     profile = profile_for(obs, profiles)
     overlap = find_overlap(obs, pages)
     dimensions = creator_editorial_dimensions(obs, profiles, pages)
+    config = gates_config()
+    creator_key = editorial_gates.normalize_creator_key(obs.channel_name, config)
+    saturation = (
+        editorial_gates.compute_saturation(creator_key, conn, config)
+        if conn is not None
+        else {
+            "source_saturation": {"status": "clear", "recent_story_count": 0, "cooldown_days_remaining": 0, "recent_matches": []},
+            "format_saturation": {"status": "clear", "format": None, "recent_matches": []},
+        }
+    )
     traction = {
         "view_count": obs.view_count,
         "duration_seconds": obs.duration_seconds,
@@ -1126,6 +1296,13 @@ def creator_lead_payload(
         "comparison_hours": obs.comparison_hours,
         "growth_signal": obs.growth_signal,
         "breakout_score": obs.breakout_score,
+    }
+    channel_baseline_payload = {
+        "comparison_video_count": obs.breakout_comparison_count,
+        "expected_views_at_current_age": obs.breakout_expected_views_at_current_age,
+        "actual_views": obs.view_count,
+        "breakout_multiple": round(obs.breakout_score, 2) if obs.breakout_score is not None else None,
+        "confidence": obs.breakout_confidence,
     }
     return {
         "lead_id": f"creator:{obs.video_id}",
@@ -1143,6 +1320,7 @@ def creator_lead_payload(
             "observed_hourly_growth": dimensions["observed_hourly_growth"],
             "absolute_views": dimensions["absolute_views"],
         },
+        "channel_baseline": channel_baseline_payload,
         "editorial_opportunity_score": dimensions["score"],
         "editorial_score_breakdown": {key: value for key, value in dimensions.items() if key != "score"},
         "likely_mfo_angle": profile.get("default_angle"),
@@ -1155,6 +1333,7 @@ def creator_lead_payload(
         },
         "archive_overlap": overlap_payload(overlap),
         "cannibalisation_risk": "exact_source" if exact_page else "possible" if overlap.page and overlap.score >= 0.35 else "weak" if overlap.page else "none",
+        "topic_overlap_breakdown": topic_overlap_breakdown(f"{obs.channel_name} {obs.video_title}", pages, exact_page),
         "imagery": {
             "available": None,
             "notes": "YouTube thumbnail may be available; verify usage rights before publication.",
@@ -1164,6 +1343,15 @@ def creator_lead_payload(
         "creator_enrichment": transcript_enrichment or {"available": False, "warning": "Transcript enrichment was not requested for this candidate."},
         "status": status,
         "existing_mfo_page": mfo_page_payload(exact_page),
+        "creator_key": creator_key,
+        "source_saturation": saturation["source_saturation"],
+        "format_saturation": saturation["format_saturation"],
+        "story_value": dimensions.get("story_value"),
+        "what_changed_now": dimensions.get("what_changed_now"),
+        "kill_reason_codes": (
+            dimensions.get("kill_reason_codes", [])
+            + (["creator_source_cooldown"] if saturation["source_saturation"]["status"] == "blocked" else [])
+        ),
     }
 
 
@@ -1226,8 +1414,9 @@ def section_lines(
 
 
 def reject_reason(obs: Observation, profiles: dict[str, dict[str, str]], pages: list[MfoPage]) -> str | None:
-    if obs.age_hours and obs.age_hours > 168 and (obs.breakout_score is None or obs.breakout_score < 1.5):
-        return "older than seven days without a clear breakout signal"
+    freshness_limit = gates_config().get("freshness_windows", {}).get("creator_video", {}).get("hours", 168)
+    if obs.age_hours and obs.age_hours > freshness_limit and (obs.breakout_score is None or obs.breakout_score < 1.5):
+        return "older than the creator-video freshness window without a clear breakout signal"
     profile = profile_for(obs, profiles)
     if profile.get("mfo_fit", "").lower().startswith("low"):
         return "low configured MFO fit"
@@ -1235,11 +1424,25 @@ def reject_reason(obs: Observation, profiles: dict[str, dict[str, str]], pages: 
 
 
 def creator_editorial_dimensions(obs: Observation, profiles: dict[str, dict[str, str]], pages: list[MfoPage]) -> dict[str, Any]:
+    config = gates_config()
     profile = profile_for(obs, profiles)
     text = f"{obs.video_title} {profile.get('default_angle', '')} {profile.get('mfo_fit', '')}".lower()
     breakout = min(100, int((obs.breakout_score or 0) * 30))
     velocity = min(100, int((obs.observed_hourly_growth or obs.total_views_per_hour or 0) / 1000 * 20))
-    freshness = 100 if (obs.age_hours or 999) <= 48 else 70 if (obs.age_hours or 999) <= 168 else 25
+    low_confidence = obs.breakout_confidence in ("pending", "low")
+    if low_confidence:
+        # No confident channel-relative baseline exists: raw views/hour
+        # (the obs.total_views_per_hour fallback above) cannot be trusted
+        # as a velocity/breakout signal without a track record to compare
+        # against. Cap these dimensions rather than the video's real
+        # fit/story-angle/evidence merits.
+        velocity = min(velocity, 20)
+        breakout = min(breakout, 20)
+    freshness_window_hours = config.get("freshness_windows", {}).get("creator_video", {}).get("hours", 168)
+    freshness_check = editorial_gates.freshness_gate("creator_video", obs.age_hours, config)
+    freshness = 100 if (obs.age_hours or 999) <= min(48, freshness_window_hours) else 70 if (obs.age_hours or 999) <= freshness_window_hours else 25
+    if freshness_check["status"] == "fail":
+        freshness = min(freshness, 10)
     fit = 80 if "high" in profile.get("mfo_fit", "").lower() else 55 if "medium" in profile.get("mfo_fit", "").lower() else 35
     story_angle = 75 if any(term in text for term in ("study", "experiment", "injury", "training", "challenge", "genetics", "transformation")) else 35
     practical = 70 if any(term in text for term in ("training", "workout", "strength", "exercise", "diet", "sleep")) else 35
@@ -1263,11 +1466,56 @@ def creator_editorial_dimensions(obs: Observation, profiles: dict[str, dict[str,
     )
     if story_angle < 50:
         score = min(score, 45)
+    kill_reason_codes: list[str] = []
+    if freshness_check["status"] == "fail":
+        # A high score must never override a failed hard gate.
+        score = min(score, 20)
+        kill_reason_codes.append(freshness_check["kill_reason"])
+    if obs.breakout_confidence == "pending":
+        # Zero comparable historical observations exist for this channel;
+        # a baseline-pending video cannot receive a Strong rating from
+        # views alone. This backstop caps the whole score below the
+        # commission_now threshold even if fit/story-angle dimensions
+        # alone would otherwise clear it on a thin video description.
+        cap = config.get("breakout_confidence", {}).get("score_cap_when_pending_or_low", 55)
+        score = min(score, cap)
+        kill_reason_codes.append("no_channel_relative_breakout")
+
+    # Creator-story eligibility checklist: the same 2-of-N discipline News
+    # Radar already applies via what_changed_now(), rather than the single
+    # crude story_angle keyword check this used to rely on alone.
+    checklist_criteria = {
+        "clear_channel_relative_breakout": obs.breakout_confidence in ("high", "medium") and (obs.breakout_score or 0) >= 1.5,
+        "recognised_entity_or_event": bool(
+            editorial_gates.classify_development_type(text, config, evidence_links=[obs.video_url]).get("entity_matched")
+        ),
+        "new_claim_or_result": any(term in text for term in ("record", "results", "proven", "debunk", "breaks", " vs ", "compared", "study shows", "world first")),
+        "practical_lesson_not_recently_covered": practical >= 70 and archive_risk <= 10,
+        "independently_verifiable_evidence": any(term in text for term in ("study", "data", "published", "peer-reviewed", "research", "official")),
+        "strong_australian_angle": aus >= 70,
+    }
+    eligibility = editorial_gates.creator_story_eligibility(checklist_criteria, config)
+    what_changed_now = None
+    if eligibility["eligible"]:
+        what_changed_now = (
+            f"Meets {len(eligibility['criteria_passed'])} of {len(checklist_criteria)} creator-story "
+            f"criteria: {', '.join(eligibility['criteria_passed'])}."
+        )
+    else:
+        # A high score must never override a failed hard gate: fewer than
+        # min_pass criteria means no clear, specific reason to commission
+        # this video now rather than any other upload from this channel.
+        cap = config.get("creator_story_checklist", {}).get("score_cap_when_ineligible", 50)
+        score = min(score, cap)
+        kill_reason_codes.append("no_new_development")
+
     return {
         "relative_channel_breakout": round(obs.breakout_score or 0, 2),
         "observed_hourly_growth": obs.observed_hourly_growth,
         "absolute_views": obs.view_count,
+        "breakout_confidence": obs.breakout_confidence,
         "freshness": freshness,
+        "freshness_gate_status": freshness_check["status"],
         "mfo_audience_fit": fit,
         "strength_of_story_angle": story_angle,
         "practical_usefulness": practical,
@@ -1275,6 +1523,11 @@ def creator_editorial_dimensions(obs: Observation, profiles: dict[str, dict[str,
         "australian_relevance": aus,
         "archive_risk": archive_risk,
         "estimated_production_effort": effort,
+        "story_value": eligibility["story_value"],
+        "checklist_results": eligibility["checklist_results"],
+        "criteria_passed": eligibility["criteria_passed"],
+        "what_changed_now": what_changed_now or "No clear current development found.",
+        "kill_reason_codes": kill_reason_codes,
         "score": max(0, min(100, score)),
     }
 
@@ -1374,6 +1627,7 @@ def write_report(
     report_path: Path,
     profiles: dict[str, dict[str, str]],
     mfo_index: dict[str, Any],
+    conn: sqlite3.Connection | None = None,
 ) -> None:
     ok = [obs for obs in observations if obs.status == "ok"]
     baseline_mode = all(obs.views_gained is None for obs in ok)
@@ -1454,10 +1708,10 @@ def write_report(
     report_path.write_text("\n".join(lines), encoding="utf-8")
 
     lead_payloads: list[dict[str, Any]] = []
-    lead_payloads.extend(creator_lead_payload(obs, profiles, pages, "new_lead", transcript_enrichment=transcript_enrichment.get(obs.video_id)) for obs in new_leads)
-    lead_payloads.extend(creator_lead_payload(obs, profiles, pages, "follow_up", transcript_enrichment=transcript_enrichment.get(obs.video_id)) for obs, _overlap in followups)
-    lead_payloads.extend(creator_lead_payload(obs, profiles, pages, "already_covered", exact_page=page) for obs, page in covered)
-    lead_payloads.extend(creator_lead_payload(obs, profiles, pages, "rejected", rejection_reason=reason) for obs, reason in rejected)
+    lead_payloads.extend(creator_lead_payload(obs, profiles, pages, "new_lead", transcript_enrichment=transcript_enrichment.get(obs.video_id), conn=conn) for obs in new_leads)
+    lead_payloads.extend(creator_lead_payload(obs, profiles, pages, "follow_up", transcript_enrichment=transcript_enrichment.get(obs.video_id), conn=conn) for obs, _overlap in followups)
+    lead_payloads.extend(creator_lead_payload(obs, profiles, pages, "already_covered", exact_page=page, conn=conn) for obs, page in covered)
+    lead_payloads.extend(creator_lead_payload(obs, profiles, pages, "rejected", rejection_reason=reason, conn=conn) for obs, reason in rejected)
     write_json_payload(
         report_path.with_suffix(".json"),
         {
@@ -1558,19 +1812,20 @@ def is_news_development(item: NewsItem) -> bool:
     return bool(terms & NEWS_TERMS)
 
 
-def cluster_key_for(item: NewsItem) -> str:
+def cluster_key_for(item: NewsItem, config: dict[str, Any] | None = None) -> str:
+    """Stable, unique key for a news cluster's primary item.
+
+    Must never collapse two distinct stories/URLs to the same key: this
+    key is both the packet lead_id suffix and the news_clusters SQLite
+    primary key, so a collision here both merges unrelated lead_ids and
+    silently overwrites one story's history with another's. Prefer DOI,
+    then PMID, then the canonical source URL (already content-clustered
+    by cluster_news_items() before this ever runs, so by this point each
+    cluster represents one distinct story and its URL is a safe, stable
+    key). Only fall back to an entity/event/date slug when no URL is
+    available at all.
+    """
     text = f"{item.title} {item.summary}".lower()
-    event_terms = {
-        "crossfit games": "crossfit-games",
-        "hyrox": "hyrox",
-        "alcohol": "alcohol",
-        "meditation": "meditation",
-        "bryan mbeumo": "bryan-mbeumo",
-    }
-    for phrase, key in event_terms.items():
-        if phrase in text:
-            dtype = "results" if any(term in text for term in ("results", "leaderboard", "wins", "won", "crowned", "roundup")) else development_type(NewsCluster(key="", items=[item]))
-            return f"{key}-{dtype}"
     for doi in extract_dois(text):
         return f"doi-{doi}"
     for pmid in extract_pmids(text):
@@ -1578,11 +1833,22 @@ def cluster_key_for(item: NewsItem) -> str:
     canonical = canonical_url(item.url)
     if canonical:
         return re.sub(r"[^a-z0-9]+", "-", canonical.lower()).strip("-")[:80]
+    classification = editorial_gates.classify_development_type(
+        f"{item.title} {item.summary}", config or gates_config(), evidence_links=[item.url]
+    )
+    entity = classification.get("entity_matched")
+    event_date = classification.get("event_date")
+    if entity:
+        parts = [entity, classification.get("development_type") or "other"]
+        if event_date:
+            parts.append(re.sub(r"[^a-z0-9]+", "-", event_date.lower()))
+        return re.sub(r"[^a-z0-9]+", "-", "-".join(parts).lower()).strip("-")[:80]
     terms = sorted(tokenize(item.title) - NEWS_TERMS - {"review", "strength", "exercise"})
     return "-".join(terms[:8]) or re.sub(r"\W+", "-", item.title.lower()).strip("-")[:60]
 
 
-def cluster_news_items(items: list[NewsItem]) -> list[NewsCluster]:
+def cluster_news_items(items: list[NewsItem], config: dict[str, Any] | None = None) -> list[NewsCluster]:
+    config = config or gates_config()
     clusters: list[NewsCluster] = []
     for item in [candidate for candidate in items if is_news_development(candidate)]:
         item_terms = tokenize(item.title)
@@ -1600,14 +1866,40 @@ def cluster_news_items(items: list[NewsItem]) -> list[NewsCluster]:
         if best and best_score >= 0.2:
             best.items.append(item)
         else:
-            clusters.append(NewsCluster(key=cluster_key_for(item), items=[item], penalties=[]))
+            clusters.append(NewsCluster(key=cluster_key_for(item, config), items=[item], penalties=[]))
     return clusters
 
 
 def upsert_news_clusters(conn: sqlite3.Connection, clusters: list[NewsCluster], seen_at: str) -> None:
+    """Persist each cluster's first/last-seen history keyed by cluster_key.
+
+    If a computed key already exists in the table but points at a
+    materially different story (low title term-overlap with the stored
+    title, or a different primary_url), assume this is a residual key
+    collision rather than the same recurring story, and disambiguate
+    with a numeric suffix instead of silently overwriting the older
+    story's first_seen/title/primary_url.
+    """
     for cluster in clusters:
         primary = primary_news_item(cluster)
-        existing = conn.execute("SELECT first_seen FROM news_clusters WHERE cluster_key = ?", (cluster.key,)).fetchone()
+        key = cluster.key
+        existing = conn.execute("SELECT first_seen, title, primary_url FROM news_clusters WHERE cluster_key = ?", (key,)).fetchone()
+        if existing and existing["primary_url"] != primary.url:
+            existing_terms = tokenize(existing["title"] or "")
+            new_terms = tokenize(primary.title or "")
+            overlap = len(existing_terms & new_terms) / max(len(existing_terms | new_terms), 1)
+            if overlap < 0.3:
+                suffix = 2
+                candidate_key = f"{key}-{suffix}"
+                while True:
+                    row = conn.execute("SELECT primary_url FROM news_clusters WHERE cluster_key = ?", (candidate_key,)).fetchone()
+                    if not row or row["primary_url"] == primary.url:
+                        break
+                    suffix += 1
+                    candidate_key = f"{key}-{suffix}"
+                cluster.key = candidate_key
+                key = candidate_key
+                existing = conn.execute("SELECT first_seen FROM news_clusters WHERE cluster_key = ?", (key,)).fetchone()
         first_seen = existing["first_seen"] if existing else seen_at
         conn.execute(
             """
@@ -1618,7 +1910,7 @@ def upsert_news_clusters(conn: sqlite3.Connection, clusters: list[NewsCluster], 
                 title = excluded.title,
                 primary_url = excluded.primary_url
             """,
-            (cluster.key, first_seen, seen_at, primary.title, primary.url),
+            (key, first_seen, seen_at, primary.title, primary.url),
         )
 
 
@@ -1690,7 +1982,17 @@ def development_type(cluster: NewsCluster) -> str:
         return "new_report"
     if any(term in text for term in ("announce", "announced", "announcement", "launch", "launched", "release date")):
         return "announcement"
-    if any(term in text for term in ("results", "result", "record", "crowned", "wins", "won")):
+    # Entity-aware: only the *primary* item's own text is checked (not the
+    # whole concatenated cluster), and a configured entity + result verb or
+    # structured evidence is required — a generic "results"/"record"
+    # substring match alone is not enough. See editorial_gates.classify_development_type.
+    primary = primary_news_item(cluster)
+    classification = editorial_gates.classify_development_type(
+        f"{primary.title} {primary.summary}",
+        gates_config(),
+        evidence_links=[item.url for item in cluster.items],
+    )
+    if classification["development_type"] == "competition_result":
         return "competition_result"
     if any(term in text for term in ("challenge", "influencer", "youtube", "tiktok")):
         return "influencer_event"
@@ -1721,6 +2023,17 @@ def topic_sensitivity(cluster: NewsCluster) -> str:
 
 
 def true_published_at(cluster: NewsCluster) -> str:
+    """The canonical age-determining date for this story. For a
+    research_media (ScienceDaily/EurekAlert-style) pickup, this is the
+    study's own canonical publication date when resolvable, never the
+    press-release/pickup date — a later news pickup must not reset a
+    study's age. Falls back to the primary item's own published date
+    when no canonical date can be resolved (unresolved DOI/PMID or
+    network failure), matching the previous behaviour."""
+    if is_research_media_item(cluster):
+        canonical = canonical_research_date_info(cluster).get("canonical_published_at")
+        if canonical:
+            return canonical
     primary = primary_news_item(cluster)
     return primary.published or "unknown"
 
@@ -1866,6 +2179,7 @@ def is_journal_news_item(cluster: NewsCluster) -> bool:
 
 def research_media_metadata(cluster: NewsCluster) -> dict[str, Any]:
     dois: list[str] = []
+    pmids: list[str] = []
     journals: list[str] = []
     hype_terms: list[str] = []
     for item in cluster.items:
@@ -1874,6 +2188,9 @@ def research_media_metadata(cluster: NewsCluster) -> dict[str, Any]:
             clean = doi.rstrip(".,);")
             if clean.lower() not in {existing.lower() for existing in dois}:
                 dois.append(clean)
+        for pmid in extract_pmids(text):
+            if pmid not in pmids:
+                pmids.append(pmid)
         journal_match = re.search(r"\b(?:journal|published in)\s+([^.;]{4,90})", text, re.I)
         if journal_match:
             journal = journal_match.group(1).strip()
@@ -1885,9 +2202,64 @@ def research_media_metadata(cluster: NewsCluster) -> dict[str, Any]:
     return {
         "role": "public-interest research signal" if is_research_media_item(cluster) else None,
         "extracted_dois": dois,
+        "extracted_pmids": pmids,
         "possible_journals": journals,
         "hype_terms": hype_terms,
         "verification_note": "Treat this as a public-interest alert. Verify the underlying paper via PubMed, DOI or publisher before writing." if is_research_media_item(cluster) else "",
+    }
+
+
+_CANONICAL_RESEARCH_DATE_CACHE: dict[tuple[str, ...], dict[str, Any]] = {}
+
+
+def canonical_research_date_info(cluster: NewsCluster) -> dict[str, Any]:
+    """Resolve the true study publication date for a research_media
+    (ScienceDaily/EurekAlert-style) cluster, distinguishing it from the
+    publicity/pickup date. Falls back to "unresolved" (never crashes) on
+    missing identifiers or network failure, so a scheduled scan is never
+    blocked by a flaky Crossref/PubMed lookup. Memoized per-process by
+    DOI/PMID set: this is called repeatedly for the same cluster across
+    several scoring dimensions within one scan, and the result never
+    changes for a given DOI/PMID within a single run."""
+    if not is_research_media_item(cluster):
+        return {
+            "canonical_published_at": None,
+            "publicity_published_at": None,
+            "canonical_date_source": "not_applicable",
+            "is_resurfaced_research": False,
+            "resurfacing_reason": None,
+        }
+    primary = primary_news_item(cluster)
+    publicity_published_at = primary.published
+    metadata = research_media_metadata(cluster)
+    cache_key = (tuple(sorted(metadata["extracted_dois"])), tuple(sorted(metadata["extracted_pmids"])))
+    if cache_key in _CANONICAL_RESEARCH_DATE_CACHE:
+        resolution = _CANONICAL_RESEARCH_DATE_CACHE[cache_key]
+    else:
+        resolution = editorial_gates.resolve_canonical_research_date(metadata["extracted_dois"], metadata["extracted_pmids"])
+        _CANONICAL_RESEARCH_DATE_CACHE[cache_key] = resolution
+    canonical_published_at = resolution["canonical_published_at"]
+    is_resurfaced = False
+    reason = None
+    if canonical_published_at:
+        canonical_dt = parse_dt(canonical_published_at)
+        publicity_dt = parse_dt(publicity_published_at)
+        if canonical_dt and publicity_dt:
+            gap_days = (publicity_dt - canonical_dt).total_seconds() / 86400
+            config = gates_config()
+            stale_gap_days = config.get("research_resurfacing", {}).get("stale_gap_days", 14)
+            if gap_days > stale_gap_days:
+                is_resurfaced = True
+                reason = (
+                    f"Canonical publication date is {round(gap_days)} days before the publicity pickup date; "
+                    "a later press release/news pickup is not a new development."
+                )
+    return {
+        "canonical_published_at": canonical_published_at,
+        "publicity_published_at": publicity_published_at,
+        "canonical_date_source": resolution["canonical_date_source"],
+        "is_resurfaced_research": is_resurfaced,
+        "resurfacing_reason": reason,
     }
 
 
@@ -1904,7 +2276,7 @@ def has_search_led_service_angle(cluster: NewsCluster) -> bool:
     return any(term in text for term in ("guide", "how to", "explainer", "what it means", "schedule", "calendar", "results", "workout"))
 
 
-def what_changed_today(cluster: NewsCluster) -> str | None:
+def what_changed_now(cluster: NewsCluster) -> str | None:
     dtype = development_type(cluster)
     primary = primary_news_item(cluster)
     if dtype in {"announcement", "competition_result", "new_report", "influencer_event"}:
@@ -1927,6 +2299,7 @@ def news_momentum(cluster: NewsCluster) -> int:
 
 
 def score_news_cluster(cluster: NewsCluster, pages: list[MfoPage]) -> None:
+    config = gates_config()
     text = " ".join(f"{item.title} {item.summary} {item.source}" for item in cluster.items).lower()
     primary = primary_news_item(cluster)
     dtype = development_type(cluster)
@@ -1937,11 +2310,28 @@ def score_news_cluster(cluster: NewsCluster, pages: list[MfoPage]) -> None:
     caps: list[str] = []
     penalties: list[str] = []
     kill_reasons: list[str] = []
+    kill_reason_codes: list[str] = []
     verify_before_write = False
     independent_count = len(independent_pickup_domains(cluster))
     aus = australian_relevance(cluster)
     age = age_hours_for_cluster(cluster)
-    changed_today = what_changed_today(cluster)
+    changed_now = what_changed_now(cluster)
+    date_info = canonical_research_date_info(cluster)
+    if date_info["is_resurfaced_research"]:
+        kill_reasons.append(date_info["resurfacing_reason"])
+        kill_reason_codes.append("publicity_date_mistaken_for_research_date")
+
+    entity_check = editorial_gates.classify_development_type(
+        f"{primary.title} {primary.summary}",
+        config,
+        evidence_links=[item.url for item in cluster.items],
+    )
+    if entity_check.get("result_verb_without_entity"):
+        kill_reasons.append(
+            "Result-style language present (e.g. \"results\"/\"record\") but no confirmed "
+            "competition entity, event date, or official source; not treated as a competition result."
+        )
+        kill_reason_codes.append("competition_entity_mismatch")
 
     overlap = find_news_overlap(cluster, pages)
     cluster.overlap = overlap
@@ -1974,8 +2364,8 @@ def score_news_cluster(cluster: NewsCluster, pages: list[MfoPage]) -> None:
     if sensitivity == "high" and (aus < 5 or dimensions["original_value"] < 60):
         caps.append("high sensitivity without strong Australian relevance/responsible value: cap 40")
         score = min(score, 40)
-    if not changed_today:
-        caps.append("what changed today unclear: cap 35")
+    if not changed_now:
+        caps.append("what changed now unclear: cap 35")
         score = min(score, 35)
         kill_reasons.append("Could not clearly answer what changed today.")
     if is_journal_news_item(cluster):
@@ -2003,6 +2393,22 @@ def score_news_cluster(cluster: NewsCluster, pages: list[MfoPage]) -> None:
         caps.append("older than seven days without new development or service angle: cap 25")
         score = min(score, 25)
         kill_reasons.append("Story is more than seven days old without a new development or strong service angle.")
+        kill_reason_codes.append("canonical_source_too_old")
+
+    freshness_category = {"competition_result": "competition_result", "announcement": "official_announcement"}.get(dtype)
+    if freshness_category:
+        # No automatic textual exception here: has_search_led_service_angle's
+        # keyword list includes "results", which would defeat this gate for
+        # almost every genuine competition-result story. Per the brief, only
+        # a specific, independently verifiable new event should exempt a
+        # stale competition result/announcement, and no such signal is
+        # available here beyond the category window itself.
+        freshness_check = editorial_gates.freshness_gate(freshness_category, age, config)
+        if freshness_check["status"] == "fail":
+            caps.append(f"outside {freshness_category} freshness window ({age and round(age, 1)}h): exclude")
+            score = min(score, 20)
+            kill_reasons.append(f"Story is outside the {freshness_category.replace('_', ' ')} freshness window.")
+            kill_reason_codes.append(freshness_check["kill_reason"] or "canonical_source_too_old")
     if is_profile_story(cluster) and (newest_age_hours(cluster) is None or (newest_age_hours(cluster) or 0) > 72):
         penalties.append("stale profile pickup, not current news -20")
     if is_female_athlete_profile(cluster) and not has_mfo_exception_for_female_profile(cluster):
@@ -2046,10 +2452,15 @@ def score_news_cluster(cluster: NewsCluster, pages: list[MfoPage]) -> None:
         },
         "caps_applied": caps,
         "penalties_applied": penalties,
-        "development_type": dtype,
+        "development_type": "resurfaced_research" if date_info["is_resurfaced_research"] else dtype,
+        "canonical_published_at": date_info["canonical_published_at"],
+        "publicity_published_at": date_info["publicity_published_at"],
+        "canonical_date_source": date_info["canonical_date_source"],
+        "is_resurfaced_research": date_info["is_resurfaced_research"],
+        "resurfacing_reason": date_info["resurfacing_reason"],
         "conclusions_changed": changed,
         "what_happened": primary.summary or "No abstract/notice text available; title is unverified.",
-        "what_changed_today": changed_today or "No clear current development found.",
+        "what_changed_now": changed_now or "No clear current development found.",
         "why_news_now": f"Published {fmt_datetime(primary.published)}; first seen by scanner is stored separately. First-seen is not treated as publication date.",
         "true_published_at": true_published_at(cluster),
         "age_hours": round(age_hours_for_cluster(cluster) or 0, 1),
@@ -2067,6 +2478,7 @@ def score_news_cluster(cluster: NewsCluster, pages: list[MfoPage]) -> None:
         "research_media": research_media_metadata(cluster),
         "verify_before_write": verify_before_write,
         "kill_reasons": kill_reasons,
+        "kill_reason_codes": kill_reason_codes,
         "confidence": confidence,
         "editor_recommendation": recommendation,
     }
@@ -2129,6 +2541,7 @@ def news_lead_payload(
     primary = primary_news_item(cluster)
     score_json = cluster.score_json or {}
     overlap = cluster.overlap or find_news_overlap(cluster, pages)
+    exact_page = exact_news_source_match(cluster, pages)
     supporting = [
         {"name": item.source, "url": item.url, "published_at": item.published}
         for item in cluster.items[1:]
@@ -2142,6 +2555,12 @@ def news_lead_payload(
         "source_url": primary.url,
         "published_at": primary.published,
         "discovered_at": discovered_at,
+        "canonical_published_at": score_json.get("canonical_published_at"),
+        "publicity_published_at": score_json.get("publicity_published_at"),
+        "canonical_date_source": score_json.get("canonical_date_source"),
+        "is_resurfaced_research": score_json.get("is_resurfaced_research", False),
+        "resurfacing_reason": score_json.get("resurfacing_reason"),
+        "actual_age_hours": score_json.get("age_hours"),
         "traction": {
             "pickups": len(cluster.items),
             "independent_domains": score_json.get("independent_domains"),
@@ -2165,6 +2584,7 @@ def news_lead_payload(
         "research_media": research_media_metadata(cluster),
         "archive_overlap": overlap_payload(overlap),
         "cannibalisation_risk": "strong" if overlap.page and overlap.score >= 0.35 else "weak" if overlap.page else "none",
+        "topic_overlap_breakdown": topic_overlap_breakdown(f"{primary.source} {primary.title}", pages, exact_page),
         "imagery": {
             "available": None,
             "notes": "Check primary source/publicity assets manually.",
@@ -2173,6 +2593,7 @@ def news_lead_payload(
         "source_fingerprints": sorted({fingerprint for item in cluster.items for fingerprint in fingerprints_for_values(item.url, item.title, item.summary)}),
         "supporting_sources": supporting,
         "status": status,
+        "kill_reason_codes": score_json.get("kill_reason_codes", []),
     }
 
 
@@ -2753,11 +3174,12 @@ def score_research_paper(paper: ResearchPaper, pages: list[MfoPage], config: dic
     score_breakdown["practical_importance"] = 16 if editorial_category == "practical_fitness_finding" else 10 if editorial_category == "newsworthy_health_finding" else 4
     score_breakdown["novelty"] = 12 if any(term in text for term in ("novel", "first", "unexpected", "challeng", "compared", "new")) else 7
     age = research_age_hours(paper)
+    practical_research_window = gates_config().get("freshness_windows", {}).get("practical_research", {}).get("hours", 336)
     if age is None:
         score_breakdown["freshness"] = 3
     elif age <= 72:
         score_breakdown["freshness"] = 10
-    elif age <= 240:
+    elif age <= practical_research_window:
         score_breakdown["freshness"] = 7
     else:
         score_breakdown["freshness"] = 3
@@ -2876,8 +3298,27 @@ def exact_research_archive_match(paper: ResearchPaper, pages: list[MfoPage]) -> 
     return None
 
 
-def research_payload(paper: ResearchPaper) -> dict[str, Any]:
+def research_kill_reason_codes(paper: ResearchPaper) -> list[str]:
+    if paper.status != "rejected":
+        return []
+    codes: list[str] = []
+    reasons_text = " ".join(paper.rejection_reasons or paper.penalties or []).lower()
+    if "exact" in reasons_text and "archive" in reasons_text:
+        codes.append("archive_cannibalisation")
+    if "archive overlap" in reasons_text:
+        codes.append("archive_cannibalisation")
+    if "missing abstract" in reasons_text or "preprint" in reasons_text:
+        codes.append("insufficient_primary_evidence")
+    if "no direct mfo training" in reasons_text or "specialist clinical" in reasons_text:
+        codes.append("wrong_audience")
+    if not codes:
+        codes.append("score_below_threshold")
+    return codes
+
+
+def research_payload(paper: ResearchPaper, pages: list[MfoPage] | None = None) -> dict[str, Any]:
     study_type = study_type_for(paper)
+    exact_page = exact_research_archive_match(paper, pages) if pages else None
     return {
         "lead_id": f"research:{paper.pmid}" if paper.pmid else f"research:{paper.doi}",
         "scanner_type": "research",
@@ -2917,6 +3358,7 @@ def research_payload(paper: ResearchPaper) -> dict[str, Any]:
         "mfo_audience_fit": f"{(paper.score_breakdown or {}).get('mfo_audience_relevance', 0)}/20",
         "weakness_or_rejection_reason": "; ".join(paper.rejection_reasons or paper.penalties or []),
         "archive_overlap": overlap_payload(paper.archive_overlap),
+        "topic_overlap_breakdown": topic_overlap_breakdown(f"{paper.journal or ''} {paper.title}", pages or [], exact_page),
         "facts_requiring_manual_verification": facts_to_verify(paper),
         "extraction_warnings": paper.extraction_warnings or [],
         "imagery": {
@@ -2926,6 +3368,7 @@ def research_payload(paper: ResearchPaper) -> dict[str, Any]:
         "estimated_production_effort_minutes": 90 if paper.status == "viable" else 45,
         "recommended_status": paper.recommended_status,
         "status": paper.status,
+        "kill_reason_codes": research_kill_reason_codes(paper),
         "primary_source": {
             "name": "PubMed",
             "url": paper.pubmed_url,
@@ -3033,7 +3476,7 @@ def write_research_report(papers: list[ResearchPaper], errors: list[str], report
         lines.append("")
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text("\n".join(lines), encoding="utf-8")
-    payloads = [research_payload(paper) for paper in viable + hold + rejected]
+    payloads = [research_payload(paper, pages) for paper in viable + hold + rejected]
     write_json_payload(
         report_path.with_suffix(".json"),
         {
@@ -3319,7 +3762,7 @@ def run_fixture_tests() -> None:
         save_observation(conn, scan2, will_current)
         observations.append(will_current)
 
-    write_report(observations, [], second, creator_report, profiles, mfo_index)
+    write_report(observations, [], second, creator_report, profiles, mfo_index, conn)
     creator_text = creator_report.read_text(encoding="utf-8")
     assert "Already Covered And Excluded" in creator_text
     assert "exact source already appears" in creator_text
@@ -3388,7 +3831,7 @@ def run_fixture_tests() -> None:
             title="HYROX announces new Australian championship event in Sydney",
             url="https://hyrox.com/new-australian-championship-sydney",
             source="HYROX",
-            published="2026-08-06T01:00:00Z",
+            published=iso(utc_now() - timedelta(hours=1)),
             summary="HYROX announced a new Australian championship event and schedule.",
             source_type="official",
         ),
@@ -3415,8 +3858,20 @@ def run_fixture_tests() -> None:
     assert len(zyzz_clusters[0].items) == 4
     assert "prnewswire.com" not in independent_domains(zyzz_clusters[0])
     pages = mfo_pages_from_index({})
-    for cluster in clusters:
-        score_news_cluster(cluster, pages)
+    # Fixture tests must stay offline: stub the Crossref/PubMed canonical
+    # date lookup that true_published_at() triggers for research_media
+    # clusters (the sciencedaily fixture below) instead of hitting the
+    # real network.
+    original_resolve_canonical_date = editorial_gates.resolve_canonical_research_date
+    editorial_gates.resolve_canonical_research_date = lambda dois, pmids, **_kwargs: {
+        "canonical_published_at": None,
+        "canonical_date_source": "unresolved",
+    }
+    try:
+        for cluster in clusters:
+            score_news_cluster(cluster, pages)
+    finally:
+        editorial_gates.resolve_canonical_research_date = original_resolve_canonical_date
     female_profile = next(cluster for cluster in clusters if "supergran" in primary_news_item(cluster).title.lower())
     australian_event = next(cluster for cluster in clusters if "australian championship" in primary_news_item(cluster).title.lower())
     correction = next(cluster for cluster in clusters if "correction" in primary_news_item(cluster).title.lower())
@@ -3796,6 +4251,364 @@ def run_fixture_tests() -> None:
     finally:
         globals()["pubmed_search"] = original_pubmed_search
     assert research_report.read_text(encoding="utf-8") == previous_text
+
+    # Known failure #5: two distinct HYROX stories must not collapse to the
+    # same cluster_key/lead_id. Previously both fell into the hardcoded
+    # "hyrox-<dtype>" collapse in cluster_key_for().
+    distinct_hyrox_items = [
+        NewsItem(
+            title="HYROX Bangkok returns with record 20,000 participants",
+            url="https://news.google.com/rss/articles/fixture-hyrox-bangkok",
+            source="Khaosod English",
+            published="2026-07-23T07:00:00Z",
+            summary="HYROX Bangkok drew a record number of participants this year.",
+            source_type="rss",
+        ),
+        NewsItem(
+            title="Aberdeenshire's 'Hyrox Granny' continues to amaze as she breaks record aged 72",
+            url="https://news.google.com/rss/articles/fixture-hyrox-granny",
+            source="Aberdeen Live",
+            published="2026-03-25T07:00:00Z",
+            summary="A 72 year old competitor broke an age-group record at a local Hyrox event.",
+            source_type="rss",
+        ),
+    ]
+    distinct_hyrox_clusters = cluster_news_items(distinct_hyrox_items)
+    assert len(distinct_hyrox_clusters) == 2, "distinct HYROX stories incorrectly merged into one cluster"
+    distinct_keys = {cluster.key for cluster in distinct_hyrox_clusters}
+    assert len(distinct_keys) == 2, f"distinct HYROX stories collapsed to the same cluster_key: {distinct_keys}"
+
+    # Same-report duplicate lead_id check across all three JSON report types.
+    for report_json_path in (creator_report.with_suffix(".json"), news_report.with_suffix(".json"), research_report.with_suffix(".json")):
+        if not report_json_path.exists():
+            continue
+        report_data = json.loads(report_json_path.read_text(encoding="utf-8"))
+        ids = [lead.get("lead_id") for lead in report_data.get("leads", [])]
+        assert len(ids) == len(set(ids)), f"duplicate lead_id(s) found in {report_json_path}: {[i for i in set(ids) if ids.count(i) > 1]}"
+
+    # Known failure #3/#6: an unrelated article using result-ish language must
+    # not be classified as a HYROX/CrossFit competition result merely because
+    # it contains generic result words.
+    fixture_gates_config = editorial_gates.load_config(EDITORIAL_GATES_CONFIG_PATH)
+    dsa_classification = editorial_gates.classify_development_type(
+        "Disability Sports Australia releases new participation plan with results for regional programs",
+        fixture_gates_config,
+        evidence_links=["https://example.com/dsa-plan"],
+    )
+    assert dsa_classification["development_type"] != "competition_result", "unrelated article misclassified as a competition result"
+    hyrox_classification = editorial_gates.classify_development_type(
+        "HYROX Bangkok returns with record 20,000 participants",
+        fixture_gates_config,
+        evidence_links=["https://hyrox.com/bangkok-results"],
+    )
+    assert hyrox_classification["development_type"] == "competition_result"
+    assert hyrox_classification["entity_matched"] == "hyrox"
+
+    # A cluster whose only entity-bearing item is an unrelated pickup must
+    # not have its development_type polluted by that item's presence
+    # elsewhere in the cluster — classification runs on the primary item.
+    dsa_cluster = NewsCluster(
+        key="fixture-dsa",
+        items=[
+            NewsItem(
+                title="Disability Sports Australia releases new participation plan with results for regional programs",
+                url="https://example.com/dsa-plan",
+                source="Disability Sports Australia",
+                published="2026-08-15T00:00:00Z",
+                summary="A participation plan with regional program results.",
+                source_type="official",
+            )
+        ],
+    )
+    assert development_type(dsa_cluster) != "competition_result", "development_type() misclassified an unrelated article as a competition result"
+    score_news_cluster(dsa_cluster, [])
+    assert "competition_entity_mismatch" in (dsa_cluster.score_json or {}).get("kill_reason_codes", []), (
+        "DSA article used result-style language but no confirmed entity; expected an explicit "
+        "competition_entity_mismatch kill reason, not a silent low score"
+    )
+    genuine_hyrox_cluster = NewsCluster(
+        key="fixture-hyrox-genuine",
+        items=[
+            NewsItem(
+                title="HYROX Bangkok returns with record 20,000 participants",
+                url="https://hyrox.com/bangkok-results",
+                source="HYROX",
+                published=iso(utc_now() - timedelta(hours=1)),
+                summary="Official HYROX results from the Bangkok leg.",
+                source_type="official",
+            )
+        ],
+    )
+    score_news_cluster(genuine_hyrox_cluster, [])
+    assert "competition_entity_mismatch" not in (genuine_hyrox_cluster.score_json or {}).get("kill_reason_codes", []), (
+        "genuine HYROX result incorrectly flagged as an entity mismatch"
+    )
+
+    # Known failure #6: the specific generic words named in the brief must
+    # not register as meaningful archive overlap.
+    generic_word_overlap = editorial_gates.weighted_topic_overlap(
+        {"story", "wrong", "answer", "brain", "first", "more"} - set(fixture_gates_config.get("overlap_stopwords_extra", [])),
+        {"story", "wrong", "answer"},
+        fixture_gates_config,
+    )
+    assert generic_word_overlap["score"] == 0.0, "generic overlap words leaked through as meaningful overlap"
+
+    # End-to-end topic_overlap_breakdown: generic shared words between an
+    # unrelated candidate and an archive page must not register overlap,
+    # while a genuine HYROX candidate must register topic overlap against
+    # existing MFO HYROX coverage even when the wording differs.
+    overlap_pages = mfo_pages_from_index(
+        {
+            "pages": [
+                {
+                    "title": "The real story behind the wrong answer everyone believes about training",
+                    "url": "https://mensfitnessonline.com.au/wrong-answer-training-myth/",
+                    "slug": "wrong-answer-training-myth",
+                },
+                {
+                    "title": "HYROX Sydney: everything Australian competitors need to know",
+                    "url": "https://mensfitnessonline.com.au/hyrox-sydney-guide/",
+                    "slug": "hyrox-sydney-guide",
+                },
+            ]
+        }
+    )
+    unrelated_breakdown = topic_overlap_breakdown(
+        "The first story with the wrong answer explained", overlap_pages, None
+    )
+    assert unrelated_breakdown["cannibalisation_risk"] == "none", "generic shared words registered as archive overlap"
+    hyrox_breakdown = topic_overlap_breakdown(
+        "HYROX announces new Bangkok event with record entries", overlap_pages, None
+    )
+    assert hyrox_breakdown["topic_overlap"]["shared_entity_terms"] == ["hyrox"], "genuine HYROX thematic overlap was missed"
+    assert hyrox_breakdown["cannibalisation_risk"] in {"medium", "high"}, "genuine HYROX thematic overlap was not flagged"
+
+    # find_overlap() itself -- not just the additive topic_overlap_breakdown
+    # field -- must use entity-weighted scoring. This is the function that
+    # actually drives the -15/-5 archive-overlap penalty in
+    # score_news_cluster() and the archive_overlap/cannibalisation_risk
+    # fields an editor sees; a fix that only lived in topic_overlap_breakdown
+    # would be inert against the real gate.
+    hyrox_candidate_obs = Observation(
+        channel_source="fixture news source",
+        channel_name="Fixture News Source",
+        video_title="HYROX announces new Bangkok event with record entries",
+        video_url="https://example.com/hyrox-bangkok-announce",
+        video_id="hyroxAnnounceFixture1",
+        upload_datetime=first,
+        view_count=0,
+        duration_seconds=None,
+        video_type="standard",
+        scan_timestamp=first,
+        age_hours=None,
+        total_views_per_hour=None,
+    )
+    find_overlap_result = find_overlap(hyrox_candidate_obs, overlap_pages)
+    candidate_text = f"{hyrox_candidate_obs.channel_name} {hyrox_candidate_obs.video_title}"
+    expected_candidate_terms = tokenize(candidate_text) - OVERLAP_STOPWORDS
+    expected_entity_terms = editorial_gates.entity_terms_for_text(candidate_text, fixture_gates_config)
+    hyrox_page = next(p for p in overlap_pages if p.slug == "hyrox-sydney-guide")
+    expected_page_terms = tokenize(f"{hyrox_page.title} {hyrox_page.slug}") - OVERLAP_STOPWORDS
+    expected_weighted = editorial_gates.weighted_topic_overlap(
+        expected_candidate_terms, expected_page_terms, fixture_gates_config, entity_terms=expected_entity_terms
+    )
+    naive_plain_score = len(expected_candidate_terms & expected_page_terms) / max(len(expected_candidate_terms), 1)
+    assert find_overlap_result.score == expected_weighted["score"], (
+        "find_overlap() is not using the entity-weighted scoring mechanism -- the actual "
+        "archive_overlap/cannibalisation_risk fields and the score_news_cluster() penalty "
+        "would silently fall back to the old unweighted formula"
+    )
+    assert "hyrox" in expected_entity_terms and find_overlap_result.score != naive_plain_score, (
+        "expected the entity-weighted score to differ from the plain shared/total formula for a genuine entity match"
+    )
+
+    # Known failure #4: a competition result between 72h and 168h old must
+    # now be excluded by the category-specific 72h competition_result gate,
+    # even though it survived the old uniform 168h cap (only a -15 penalty).
+    stale_result = NewsCluster(
+        key="fixture-stale-hyrox-result",
+        items=[
+            NewsItem(
+                title="HYROX Melbourne results: local athlete wins age-group title",
+                url="https://example.com/hyrox-melbourne-results",
+                source="Example Sport",
+                published=iso(utc_now() - timedelta(hours=100)),
+                summary="Results from the HYROX Melbourne event held recently.",
+                source_type="rss",
+            )
+        ],
+    )
+    score_news_cluster(stale_result, pages)
+    assert stale_result.score <= 20, "competition result older than the 72h window was not excluded"
+    assert "canonical_source_too_old" in (stale_result.score_json or {}).get("kill_reason_codes", [])
+
+    # Known failure #7: a viral-looking video with a huge raw view count
+    # but zero comparable historical observations for its channel (a
+    # brand new channel, first ever scan) must not be treated as a
+    # confirmed breakout, and must not clear the commission_now threshold
+    # on raw views alone.
+    viral_db = Path("/tmp/mfo-scanner-viral-fixture.db")
+    if viral_db.exists():
+        viral_db.unlink()
+    viral_conn = connect_db(viral_db)
+    with viral_conn:
+        viral_scan = create_scan(viral_conn, first, 1, "scheduled")
+        viral_obs = Observation(
+            channel_source="fixture viral creator",
+            channel_name="Fixture Viral Creator",
+            video_title="I tried the viral training method and it changed everything",
+            video_url="https://www.youtube.com/watch?v=viralFixture1",
+            video_id="viralFixture1",
+            upload_datetime=first,
+            view_count=5_000_000,
+            duration_seconds=900,
+            video_type="standard",
+            scan_timestamp=first,
+            age_hours=6,
+            total_views_per_hour=833_333.0,
+        )
+        viral_obs = enrich_growth(viral_conn, viral_obs)
+        save_observation(viral_conn, viral_scan, viral_obs)
+    assert viral_obs.breakout_confidence == "pending", "first-ever observation should have pending breakout confidence"
+    viral_dimensions = creator_editorial_dimensions(viral_obs, profiles, pages)
+    assert viral_dimensions["score"] < 70, "cold-start video with huge raw views cleared the commission_now threshold on views alone"
+    assert "no_channel_relative_breakout" in viral_dimensions["kill_reason_codes"]
+
+    # Creator-story eligibility checklist: a thin, generic video description
+    # (no recognised entity, no specific new claim, no verifiable evidence,
+    # no Australian angle) must fail the 2-of-N checklist and be marked with
+    # an explicit reason, not just a low score.
+    assert viral_dimensions["story_value"] == "weak", f"thin creator video should score weak on the eligibility checklist, got {viral_dimensions['story_value']}"
+    assert "no_new_development" in viral_dimensions["kill_reason_codes"], "creator video failing the eligibility checklist must carry an explicit no_new_development reason"
+
+    # A creator video with a recognised entity, a specific new claim, a
+    # practical lesson, verifiable evidence and a strong Australian angle
+    # must clear the checklist (>= 2 of 6) even while its channel-relative
+    # breakout confidence is still pending (a brand new channel).
+    strong_case_obs = Observation(
+        channel_source="fixture strong creator",
+        channel_name="Fixture Strong Creator",
+        video_title="Australian HYROX Sydney results: local dad breaks age-group record after new training study, verified by official data",
+        video_url="https://www.youtube.com/watch?v=strongCaseFixture1",
+        video_id="strongCaseFixture1",
+        upload_datetime=first,
+        view_count=50_000,
+        duration_seconds=600,
+        video_type="standard",
+        scan_timestamp=first,
+        age_hours=6,
+        total_views_per_hour=8_333.0,
+        breakout_confidence="pending",
+    )
+    strong_case_dimensions = creator_editorial_dimensions(strong_case_obs, profiles, pages)
+    assert strong_case_dimensions["story_value"] in ("moderate", "strong"), (
+        f"creator video passing multiple eligibility criteria should not be marked weak, got {strong_case_dimensions['story_value']}"
+    )
+    assert "no_new_development" not in strong_case_dimensions["kill_reason_codes"], "creator video clearing the eligibility checklist was incorrectly given a no_new_development kill reason"
+    assert strong_case_dimensions["what_changed_now"] != "No clear current development found.", "eligible creator video should have a populated what_changed_now"
+    assert len(strong_case_dimensions["criteria_passed"]) >= 2
+
+    # Known failure #1: a study promoted by publicity months after its real
+    # publication date must remain dated by its canonical publication date,
+    # not the later press-release pickup date. Stub the Crossref/PubMed
+    # lookup to return a specific old date and confirm true_published_at()
+    # uses it instead of the fresh RSS pubDate.
+    resurfaced_cluster = NewsCluster(
+        key="fixture-resurfaced-study",
+        items=[
+            NewsItem(
+                title="Scientists highlight new diabetes and exercise findings",
+                url="https://www.sciencedaily.com/releases/2026/08/fixture-resurfaced.htm",
+                source="ScienceDaily",
+                published=iso(utc_now() - timedelta(hours=6)),
+                summary="A university media office promoted a study on diabetes and exercise. DOI: 10.1000/resurfaced-study.",
+                source_type="research_media",
+            )
+        ],
+    )
+    original_resolve_canonical_date_2 = editorial_gates.resolve_canonical_research_date
+    canonical_study_date = iso(utc_now() - timedelta(days=100))
+    editorial_gates.resolve_canonical_research_date = lambda dois, pmids, **_kwargs: {
+        "canonical_published_at": canonical_study_date,
+        "canonical_date_source": "crossref_doi",
+    }
+    try:
+        date_info = canonical_research_date_info(resurfaced_cluster)
+        assert date_info["canonical_published_at"] == canonical_study_date
+        assert date_info["is_resurfaced_research"] is True, "resurfaced research was not flagged despite a large publicity/canonical date gap"
+        assert date_info["resurfacing_reason"]
+        resolved_published_at = true_published_at(resurfaced_cluster)
+        assert resolved_published_at == canonical_study_date, "true_published_at() used the publicity pickup date instead of the canonical study date"
+        resurfaced_age = age_hours_for_cluster(resurfaced_cluster)
+        assert resurfaced_age is not None and resurfaced_age > 24 * 90, "resurfaced study age was computed from the publicity date, not the canonical date"
+    finally:
+        editorial_gates.resolve_canonical_research_date = original_resolve_canonical_date_2
+
+    # Known failure #2: an RP-derived video must be blocked by source
+    # saturation if an RP-derived story was already published recently,
+    # even under different name spellings (RP / Renaissance Periodization
+    # / Dr Mike Israetel all resolve to the same creator_key).
+    saturation_db = Path("/tmp/mfo-scanner-saturation-fixture.db")
+    if saturation_db.exists():
+        saturation_db.unlink()
+    saturation_conn = connect_db(saturation_db)
+    fixture_gates_config_2 = editorial_gates.load_config(EDITORIAL_GATES_CONFIG_PATH)
+    rp_key = editorial_gates.normalize_creator_key("Renaissance Periodization", fixture_gates_config_2)
+    editorial_gates.record_publication_history(
+        saturation_conn,
+        page_url="https://mensfitnessonline.com.au/dr-mike-israetel-supplements/",
+        creator_key=editorial_gates.normalize_creator_key("Dr Mike Israetel", fixture_gates_config_2),
+        creator_display_name="Renaissance Periodization",
+        published_at=iso(utc_now() - timedelta(days=3)),
+        format_=None,
+    )
+    saturation_conn.commit()
+    saturation = editorial_gates.compute_saturation(rp_key, saturation_conn, fixture_gates_config_2)
+    assert saturation["source_saturation"]["status"] == "blocked", "recent RP-derived story did not block a new RP-derived lead via source saturation"
+    assert saturation["source_saturation"]["recent_story_count"] == 1
+    unrelated_saturation = editorial_gates.compute_saturation("jeff_nippard", saturation_conn, fixture_gates_config_2)
+    assert unrelated_saturation["source_saturation"]["status"] == "clear", "an unrelated creator was incorrectly flagged as saturated"
+
+    # Real WordPress REST API `date` fields carry no UTC offset (e.g.
+    # "2026-08-10T09:24:11", not "...Z"), unlike every other timestamp this
+    # scanner generates internally via iso(). A live scan crashed the first
+    # time this path ran against real archive data because parse_dt() left
+    # that string timezone-naive, and naive - aware datetime subtraction
+    # raises TypeError. Confirm a naive published_at no longer crashes
+    # compute_saturation() and is still treated as a real, recent match.
+    naive_key = "naive_date_creator"
+    editorial_gates.record_publication_history(
+        saturation_conn,
+        page_url="https://mensfitnessonline.com.au/naive-date-fixture/",
+        creator_key=naive_key,
+        creator_display_name="Naive Date Creator",
+        published_at=(datetime.now(timezone.utc) - timedelta(days=2)).isoformat(timespec="seconds"),
+        format_=None,
+    )
+    saturation_conn.commit()
+    naive_date_saturation = editorial_gates.compute_saturation(naive_key, saturation_conn, fixture_gates_config_2)
+    assert naive_date_saturation["source_saturation"]["status"] == "blocked", "a timezone-naive published_at (as WordPress's REST API returns) crashed or was not recognised as a recent match"
+
+    # End-to-end: creator_lead_payload() itself must surface the cooldown
+    # for a new RP video, given the same saturation_conn/history above.
+    rp_obs = Observation(
+        channel_source="fixture RP",
+        channel_name="Renaissance Periodization",
+        video_title="Francis Ngannou training breakdown",
+        video_url="https://www.youtube.com/watch?v=rpFixtureVideo1",
+        video_id="rpFixtureVideo1",
+        upload_datetime=iso(utc_now() - timedelta(hours=2)),
+        view_count=200000,
+        duration_seconds=900,
+        video_type="standard",
+        scan_timestamp=iso(utc_now()),
+        age_hours=2,
+        total_views_per_hour=100000.0,
+    )
+    rp_payload = creator_lead_payload(rp_obs, {}, [], "new_lead", conn=saturation_conn)
+    assert rp_payload["source_saturation"]["status"] == "blocked", "creator_lead_payload() did not surface the RP source-saturation cooldown"
+    assert "creator_source_cooldown" in rp_payload["kill_reason_codes"]
+
     print(f"Fixture tests passed: {creator_report}, {news_report}")
 
 
@@ -3842,7 +4655,7 @@ def run_scan(
 
         conn.execute("UPDATE scans SET error_count = ? WHERE id = ?", (len(errors), scan_id))
 
-    write_report(observations, errors, scan_timestamp, report_path, profiles, mfo_index)
+    write_report(observations, errors, scan_timestamp, report_path, profiles, mfo_index, conn)
     return observations
 
 
@@ -3922,7 +4735,7 @@ def insert_fixture_scan(
             save_observation(conn, scan3, obs)
             third_observations.append(obs)
 
-    write_report(third_observations, [], third, report_path, profiles or {}, mfo_index or {})
+    write_report(third_observations, [], third, report_path, profiles or {}, mfo_index or {}, conn)
 
 
 def should_auto_open_reports(args: argparse.Namespace) -> bool:
@@ -3980,7 +4793,15 @@ def main() -> int:
     mfo_index: dict[str, Any] = {}
     if not args.skip_mfo_index:
         full_scan = not args.skip_creator and not args.skip_news and not args.skip_research
-        mfo_index = load_mfo_index(args.mfo_index, args.mfo_site, refresh=args.refresh_mfo_index or full_scan)
+        try:
+            lexicon_channels = load_channels(args.channels)
+        except (FileNotFoundError, ValueError):
+            lexicon_channels = []
+        creator_lexicon = editorial_gates.build_creator_lexicon(lexicon_channels, gates_config())
+        mfo_index = load_mfo_index(args.mfo_index, args.mfo_site, refresh=args.refresh_mfo_index or full_scan, creator_lexicon=creator_lexicon)
+        synced = sync_publication_history(connect_db(args.db), mfo_pages_from_index(mfo_index))
+        if synced:
+            print(f"Publication history: attributed {synced} archived pages to a known creator.")
 
     if args.fixture_growth_test:
         insert_fixture_scan(args.db, args.report, profiles, mfo_index)

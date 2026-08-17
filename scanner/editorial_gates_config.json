@@ -1,0 +1,110 @@
+{
+  "freshness_windows": {
+    "competition_result": {"hours": 72, "hard_gate": true},
+    "official_announcement": {"hours": 168, "hard_gate": true},
+    "practical_research": {"hours": 336, "hard_gate": false},
+    "creator_video": {"hours": 168, "hard_gate": true},
+    "evergreen": {"hours": null, "hard_gate": false, "requires_reason": true}
+  },
+  "saturation": {
+    "cooldown_days_source": 14,
+    "cooldown_days_format": 30
+  },
+  "research_resurfacing": {
+    "stale_gap_days": 14
+  },
+  "breakout_confidence": {
+    "comparison_window": 20,
+    "min_observations": {"high": 12, "medium": 5, "low": 1},
+    "age_match_tolerance_hours": 12,
+    "score_cap_when_pending_or_low": 55
+  },
+  "creator_aliases": {
+    "rp": "renaissance_periodization",
+    "renaissance periodization": "renaissance_periodization",
+    "dr mike israetel": "renaissance_periodization",
+    "mike israetel": "renaissance_periodization",
+    "israetel": "renaissance_periodization"
+  },
+  "creator_lexicon": {
+    "excluded_handles": ["CrossFit", "CrossFitGamesTV", "hyroxworld"],
+    "extra_variants": {
+      "athleanx": ["athlean-x", "athlean x", "jeff cavaliere", "cavaliere"],
+      "gregdoucette": ["greg doucette"],
+      "vladimirfitness": ["vladimir fitness"]
+    }
+  },
+  "entities": {
+    "hyrox": {
+      "aliases": ["hyrox"],
+      "official_domains": ["hyrox.com"],
+      "result_verbs": ["results", "record", "win", "won", "wins", "crowned", "podium", "leaderboard", "finished", "placed", "champion", "title"]
+    },
+    "crossfit_games": {
+      "aliases": ["crossfit games"],
+      "official_domains": ["games.crossfit.com", "crossfit.com"],
+      "result_verbs": ["results", "leaderboard", "win", "won", "wins", "crowned", "podium", "finished", "placed", "champion", "title"]
+    },
+    "powerlifting_australia": {
+      "aliases": ["powerlifting australia"],
+      "official_domains": ["powerliftingaustralia.com.au"],
+      "result_verbs": ["results", "record", "win", "won", "wins", "crowned", "podium", "champion", "title"]
+    },
+    "australian_weightlifting": {
+      "aliases": ["australian weightlifting federation"],
+      "official_domains": ["awf.com.au"],
+      "result_verbs": ["results", "record", "win", "won", "wins", "crowned", "podium", "champion", "title"]
+    }
+  },
+  "overlap_stopwords_extra": ["story", "wrong", "answer", "brain", "first", "more", "video", "watch", "look", "best", "top", "here"],
+  "cannibalisation_thresholds": {
+    "high_score": 0.4,
+    "medium_score": 0.35
+  },
+  "kill_reasons": {
+    "canonical_source_too_old": "Canonical publication date is outside the category freshness window.",
+    "publicity_date_mistaken_for_research_date": "A publicity/pickup date was being used instead of the study's canonical publication date; corrected and re-evaluated.",
+    "creator_source_cooldown": "This creator/source family already has a published or commissioned story within the cooldown window.",
+    "repeated_creator_format": "This creator's recurring format was recently used and is in cooldown.",
+    "no_channel_relative_breakout": "No confident channel-relative breakout baseline; raw views alone cannot support a Strong rating.",
+    "no_new_development": "No specific, independently verifiable new development was identified.",
+    "generic_evergreen": "Evergreen material without a documented search, traffic or archive-development reason.",
+    "wrong_audience": "Not a fit for the Australian men 35-65 audience.",
+    "insufficient_primary_evidence": "Primary evidence is missing or cannot be independently verified.",
+    "competition_entity_mismatch": "The competition entity was not confirmed in the canonical headline/body with a result verb and event details.",
+    "archive_cannibalisation": "Substantially duplicates existing MFO coverage of the same topic.",
+    "creator_drama": "Creator drama or reaction content without new information.",
+    "promotional_source_without_independent_value": "Promotional/brand source without independent verification or value beyond retelling.",
+    "diversity_cap_reached": "Slate diversity constraint (creator/research/topic cap) already satisfied.",
+    "score_below_threshold": "Final score below the editorial viability threshold."
+  },
+  "slate_constraints": {
+    "max_creator": 2,
+    "max_research": 2,
+    "max_same_broad_topic": 2,
+    "max_slate_size": 6
+  },
+  "creator_story_checklist": {
+    "criteria": [
+      "clear_channel_relative_breakout",
+      "recognised_entity_or_event",
+      "new_claim_or_result",
+      "practical_lesson_not_recently_covered",
+      "independently_verifiable_evidence",
+      "strong_australian_angle"
+    ],
+    "min_pass": 2,
+    "score_cap_when_ineligible": 50
+  },
+  "topic_taxonomy": {
+    "hyrox": ["hyrox"],
+    "crossfit": ["crossfit"],
+    "testosterone_mens_health": ["testosterone", "erectile", "prostate", "trt"],
+    "supplements": ["creatine", "protein", "supplement", "whey", "caffeine"],
+    "strength_training": ["hypertrophy", "resistance training", "strength training", "powerlifting", "weightlifting"],
+    "weight_loss": ["weight loss", "semaglutide", "tirzepatide", "glp-1", "obesity"],
+    "running_cardio": ["running", "vo2", "cardiorespiratory", "hiit", "interval training"],
+    "sleep_recovery": ["sleep", "recovery", "fatigue"],
+    "injury_rehab": ["injury", "tendinopathy", "knee", "shoulder", "back pain", "rehabilitation"]
+  }
+}

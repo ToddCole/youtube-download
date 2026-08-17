@@ -155,6 +155,40 @@ class EditorialDeskTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_commission_decision_records_creator_key_in_commission_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            creator_json = tmp_path / "latest.json"
+            creator_json.write_text(
+                json.dumps(
+                    {
+                        "scanner_type": "creator",
+                        "leads": [
+                            {
+                                "lead_id": "creator:rpTestVideo",
+                                "scanner_type": "creator",
+                                "source_name": "Renaissance Periodization",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(main, "SCANNER_DB", tmp_path / "scanner.db"), mock.patch.object(main, "CREATOR_JSON", creator_json):
+                main.save_editorial_decision(main.EditorialDecisionRequest(lead_id="creator:rpTestVideo", decision="commission"))
+                conn = main.editorial_conn()
+                try:
+                    row = conn.execute(
+                        "SELECT creator_key, scanner_type, decision FROM commission_history WHERE lead_id = ?",
+                        ("creator:rpTestVideo",),
+                    ).fetchone()
+                finally:
+                    conn.close()
+        self.assertIsNotNone(row, "commission_history row was not written for a resolvable lead")
+        self.assertEqual(row["creator_key"], "renaissance_periodization")
+        self.assertEqual(row["scanner_type"], "creator")
+        self.assertEqual(row["decision"], "commission")
+
     def test_invalid_timestamp_is_stale(self):
         status = main.report_age_status("not-a-date")
         self.assertTrue(status["is_stale"])
@@ -255,6 +289,77 @@ class EditorialDeskTests(unittest.TestCase):
                 queue = main.list_production_queue()
                 self.assertEqual(queue["news:test"]["status"], "article_imported")
                 self.assertEqual(queue["news:test"]["source_lead"]["title"], "Test story")
+
+    def test_build_review_packet_enforces_creator_diversity_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            creator_json = tmp_path / "latest.json"
+            creator_json.write_text(
+                json.dumps(
+                    {
+                        "scanner_type": "creator",
+                        "generated_at": "2026-08-17T00:00:00Z",
+                        "lead_count": 4,
+                        "leads": [
+                            {
+                                "lead_id": f"creator:rpVideo{i}",
+                                "scanner_type": "creator",
+                                "source_name": "Renaissance Periodization",
+                                "creator_key": "renaissance_periodization",
+                                "title": f"RP video {i}",
+                                "source_url": f"https://www.youtube.com/watch?v=rpVideo{i}",
+                                "editorial_opportunity_score": 90 - i,
+                                "status": "new_lead",
+                                "kill_reason_codes": [],
+                            }
+                            for i in range(4)
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            news_json = tmp_path / "news-latest.json"
+            news_json.write_text(json.dumps({"scanner_type": "news", "leads": []}), encoding="utf-8")
+            research_json = tmp_path / "research-latest.json"
+            research_json.write_text(json.dumps({"scanner_type": "research", "leads": []}), encoding="utf-8")
+            with (
+                mock.patch.object(main, "CREATOR_JSON", creator_json),
+                mock.patch.object(main, "NEWS_JSON", news_json),
+                mock.patch.object(main, "RESEARCH_JSON", research_json),
+                mock.patch.object(main, "refresh_mfo_index_for_packet", lambda: None),
+            ):
+                packet = main.build_review_packet()
+        slate_ids = [lead["lead_id"] for lead in packet["packet"]["daily_editorial"]["commission_now"]]
+        slate_ids += [lead["lead_id"] for lead in packet["packet"]["daily_editorial"]["hold_for_follow_up"]]
+        rp_slate_leads = [lead_id for lead_id in slate_ids if lead_id.startswith("creator:rpVideo")]
+        self.assertLessEqual(len(rp_slate_leads), 2, "more than 2 RP-derived leads were admitted to the recommended slate")
+
+    def test_hard_kill_reason_code_routes_to_excluded_candidates(self):
+        creator_payload = {
+            "scanner_type": "creator",
+            "leads": [
+                {
+                    "lead_id": "creator:staleVideo",
+                    "scanner_type": "creator",
+                    "status": "new_lead",
+                    "editorial_opportunity_score": 85,
+                    "kill_reason_codes": ["canonical_source_too_old"],
+                },
+                {
+                    "lead_id": "creator:pendingVideo",
+                    "scanner_type": "creator",
+                    "status": "new_lead",
+                    "editorial_opportunity_score": 55,
+                    "kill_reason_codes": ["no_channel_relative_breakout"],
+                },
+            ],
+        }
+        candidates, excluded = main.packet_leads(creator_payload, 10)
+        candidate_ids = {lead["lead_id"] for lead in candidates}
+        excluded_ids = {lead["lead_id"] for lead in excluded}
+        self.assertIn("creator:staleVideo", excluded_ids, "a hard kill_reason_code did not route the lead to excluded_candidates")
+        self.assertNotIn("creator:staleVideo", candidate_ids)
+        self.assertIn("creator:pendingVideo", candidate_ids, "a soft kill_reason_code incorrectly excluded a still-visible candidate")
 
     def test_manual_news_duplicate_keeps_manual_candidate(self):
         alcohol_url = "https://www.sciencedaily.com/releases/2026/08/260806100000.htm"

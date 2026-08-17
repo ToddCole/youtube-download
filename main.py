@@ -34,6 +34,11 @@ NEWS_JSON = SCANNER_DIR / "reports" / "news-latest.json"
 RESEARCH_JSON = SCANNER_DIR / "reports" / "research-latest.json"
 SUPERVISOR_PROMPT = SCANNER_DIR / "editorial_supervisor_prompt.md"
 SUPERVISOR_SCHEMA = SCANNER_DIR / "editorial_supervisor_response.schema.json"
+EDITORIAL_GATES_CONFIG_PATH = SCANNER_DIR / "editorial_gates_config.json"
+
+if str(SCANNER_DIR) not in sys.path:
+    sys.path.insert(0, str(SCANNER_DIR))
+import editorial_gates  # noqa: E402
 STALE_HOURS = 14
 VERY_STALE_HOURS = 24
 
@@ -453,6 +458,21 @@ def load_json_file(path: Path, default: Any) -> Any:
         return default
 
 
+def find_lead_by_id(lead_id: str) -> dict[str, Any] | None:
+    """Look up a lead's current scanner-report payload by lead_id, so a
+    decision write can resolve creator_key/scanner_type without the
+    client having to resend the whole lead. Best-effort: the lead may
+    have aged out of the top-10-per-stream packet slice or the reports
+    may have been regenerated since the packet was shown; a miss just
+    means that decision won't count toward source saturation."""
+    for path in (CREATOR_JSON, NEWS_JSON, RESEARCH_JSON):
+        payload = load_json_file(path, {"leads": []})
+        for lead in payload.get("leads", []):
+            if isinstance(lead, dict) and lead.get("lead_id") == lead_id:
+                return lead
+    return None
+
+
 def ensure_editorial_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -524,6 +544,7 @@ def ensure_editorial_tables(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    editorial_gates.ensure_saturation_tables(conn)
     conn.commit()
 
 
@@ -1182,6 +1203,9 @@ def dedupe_packet_candidates(groups: dict[str, list[dict]]) -> tuple[dict[str, l
     return deduped, duplicate_notes
 
 
+SOFT_KILL_REASON_CODES = {"no_channel_relative_breakout"}
+
+
 def packet_leads(payload: dict, limit: int = 10) -> tuple[list[dict], list[dict]]:
     scanner_type = payload.get("scanner_type") or ""
     candidates: list[dict] = []
@@ -1193,7 +1217,8 @@ def packet_leads(payload: dict, limit: int = 10) -> tuple[list[dict], list[dict]
             continue
         item = {**lead, "raw_scanner_rank": index}
         status = str(item.get("status") or "")
-        if status in excluded_statuses:
+        hard_kill_codes = set(item.get("kill_reason_codes") or []) - SOFT_KILL_REASON_CODES
+        if status in excluded_statuses or hard_kill_codes:
             excluded.append(item)
         elif status in candidate_statuses:
             candidates.append(item)
@@ -1236,6 +1261,41 @@ def manual_story_candidates(manual_stories: list[dict[str, Any]] | None) -> list
     return candidates
 
 
+def slate_candidate_metadata(lead: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    """Derives the fields editorial_gates.select_slate() needs (score,
+    creator_key, broad_topic, AU/current-development flags) from a
+    packet lead dict, without requiring every scanner-type payload to
+    have computed them identically upstream. Creator leads already carry
+    creator_key from scanner.py; news/research leads derive it here from
+    source_name, since only Creator Radar currently has a saturation
+    lookup wired into its own payload builder."""
+    scanner_type = lead.get("scanner_type")
+    creator_key = lead.get("creator_key") or editorial_gates.normalize_creator_key(lead.get("source_name"), config)
+    title_text = f"{lead.get('title', '')} {lead.get('source_name', '')}"
+    broad_topic = editorial_gates.broad_topic_for(title_text, config)
+    score_json = lead.get("score_json") or {}
+    is_australian = bool(
+        (lead.get("editorial_score_breakdown") or {}).get("australian_relevance")
+        or score_json.get("australian_relevance_0_10", 0) >= 6
+        or "australia" in title_text.lower()
+        or "australian" in title_text.lower()
+    )
+    is_current_development = bool(
+        score_json.get("what_changed_now") or lead.get("what_changed_now")
+    ) and not score_json.get("is_resurfaced_research")
+    return {
+        **lead,
+        "scanner_type": scanner_type,
+        "score": lead_score_value(lead),
+        "creator_key": creator_key,
+        "broad_topic": broad_topic,
+        "is_australian": is_australian,
+        "is_current_development": is_current_development,
+        "story_category": lead.get("story_category"),
+        "service_story_reason": lead.get("service_story_reason"),
+    }
+
+
 def build_review_packet(manual_stories: list[dict[str, Any]] | None = None) -> dict:
     refresh_mfo_index_for_packet()
     creator = load_json_file(CREATOR_JSON, {"scanner_type": "creator", "leads": []})
@@ -1262,16 +1322,35 @@ def build_review_packet(manual_stories: list[dict[str, Any]] | None = None) -> d
     news_candidates = review_candidates.get("news", [])
     research_candidates = review_candidates.get("research", [])
     manual_candidates = review_candidates.get("manual", [])
+
+    gates_config_data = editorial_gates.load_config(EDITORIAL_GATES_CONFIG_PATH)
+    slate_candidates = [
+        slate_candidate_metadata(lead, gates_config_data)
+        for leads in review_candidates.values()
+        for lead in leads
+    ]
+    slate_result = editorial_gates.select_slate(slate_candidates, gates_config_data)
+    admitted = slate_result["admitted"]
     commission_now = sorted(
-        [lead for leads in review_candidates.values() for lead in leads if lead_score_value(lead) >= 70],
+        [lead for lead in admitted if lead_score_value(lead) >= 70],
         key=lead_score_value,
         reverse=True,
     )[:3]
     hold_for_follow_up = sorted(
-        [lead for leads in review_candidates.values() for lead in leads if 50 <= lead_score_value(lead) < 70],
+        [lead for lead in admitted if 50 <= lead_score_value(lead) < 70],
         key=lead_score_value,
         reverse=True,
     )[:3]
+    slate_diversity_exclusions = [
+        {
+            "lead_id": lead.get("lead_id"),
+            "scanner_type": lead.get("scanner_type"),
+            "title": lead.get("title"),
+            "kill_reason_codes": lead.get("kill_reason_codes", []),
+        }
+        for lead in slate_result["excluded_for_diversity"]
+        if lead_score_value(lead) >= 50
+    ]
     packet = {
         "packet_schema_version": 2,
         "generated_at": utc_iso(),
@@ -1314,6 +1393,7 @@ def build_review_packet(manual_stories: list[dict[str, Any]] | None = None) -> d
             "commission_now": commission_now,
             "hold_for_follow_up": hold_for_follow_up,
             "duplicate_notes": duplicate_notes,
+            "slate_diversity_exclusions": slate_diversity_exclusions,
             "rejection_summary": {
                 "creator": len(creator_excluded),
                 "news": len(news_excluded),
@@ -1553,6 +1633,18 @@ def save_editorial_decision(req: EditorialDecisionRequest):
             """,
             (req.lead_id, req.decision, req.note or "", now),
         )
+        lead = find_lead_by_id(req.lead_id)
+        if lead:
+            creator_key = editorial_gates.normalize_creator_key(lead.get("source_name"), editorial_gates.load_config(EDITORIAL_GATES_CONFIG_PATH))
+            editorial_gates.record_commission_history(
+                conn,
+                lead_id=req.lead_id,
+                creator_key=creator_key,
+                scanner_type=lead.get("scanner_type", ""),
+                format_=None,
+                decision=req.decision,
+                decided_at=now,
+            )
         if req.decision == "commission":
             upsert_production_queue_item(conn, req.lead_id)
         conn.commit()

@@ -7,3 +7,6 @@ scanner/scanner.db-shm
 scanner/scanner.db-wal
 scanner/mfo_index.json
 scanner/reports/
+scanner/trend_radar.db
+scanner/trend_radar.db-shm
+scanner/trend_radar.db-wal

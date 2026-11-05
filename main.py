@@ -41,6 +41,7 @@ if str(SCANNER_DIR) not in sys.path:
 import settings  # noqa: E402,F401  (loads .env)
 import editorial_gates  # noqa: E402
 from cycle_lock import LockBusy, cycle_lock  # noqa: E402
+from editorial_today import find_trend_lead, run_agent_review, trend_leads  # noqa: E402
 STALE_HOURS = 14
 VERY_STALE_HOURS = 24
 
@@ -467,6 +468,8 @@ def find_lead_by_id(lead_id: str) -> dict[str, Any] | None:
     have aged out of the top-10-per-stream packet slice or the reports
     may have been regenerated since the packet was shown; a miss just
     means that decision won't count toward source saturation."""
+    if lead_id.startswith("trend:"):
+        return find_trend_lead(lead_id)
     for path in (CREATOR_JSON, NEWS_JSON, RESEARCH_JSON):
         payload = load_json_file(path, {"leads": []})
         for lead in payload.get("leads", []):
@@ -496,6 +499,13 @@ def ensure_editorial_tables(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    review_columns = {row[1] for row in conn.execute("PRAGMA table_info(agent_reviews)").fetchall()}
+    if "packet_json" not in review_columns:
+        conn.execute("ALTER TABLE agent_reviews ADD COLUMN packet_json TEXT")
+    if "source" not in review_columns:
+        conn.execute("ALTER TABLE agent_reviews ADD COLUMN source TEXT")
+    if "usage_json" not in review_columns:
+        conn.execute("ALTER TABLE agent_reviews ADD COLUMN usage_json TEXT")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS scanner_ui_runs (
@@ -1308,8 +1318,10 @@ def slate_candidate_metadata(lead: dict[str, Any], config: dict[str, Any]) -> di
     }
 
 
-def build_review_packet(manual_stories: list[dict[str, Any]] | None = None) -> dict:
-    refresh_mfo_index_for_packet()
+def build_review_packet(manual_stories: list[dict[str, Any]] | None = None, refresh_archive: bool = True) -> dict:
+    # The scheduled cycle keeps mfo_index.json fresh; only refresh here when it is stale.
+    if refresh_archive and archive_index_age_hours() > 24:
+        refresh_mfo_index_for_packet()
     creator = load_json_file(CREATOR_JSON, {"scanner_type": "creator", "leads": []})
     news = load_json_file(NEWS_JSON, {"scanner_type": "news", "leads": []})
     research = load_json_file(RESEARCH_JSON, {"scanner_type": "research", "leads": []})
@@ -1445,6 +1457,13 @@ def build_review_packet(manual_stories: list[dict[str, Any]] | None = None) -> d
     }
     markdown = render_review_packet_markdown(packet)
     return {"packet": packet, "markdown": markdown}
+
+
+def archive_index_age_hours() -> float:
+    index_path = SCANNER_DIR / "mfo_index.json"
+    if not index_path.exists():
+        return float("inf")
+    return (datetime.now(timezone.utc).timestamp() - index_path.stat().st_mtime) / 3600
 
 
 def refresh_mfo_index_for_packet() -> None:
@@ -1663,13 +1682,72 @@ def import_agent_review(req: AgentReviewImportRequest):
     with editorial_conn() as conn:
         conn.execute(
             """
-            INSERT INTO agent_reviews (id, imported_at, raw_json, validation_status)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO agent_reviews (id, imported_at, raw_json, validation_status, source)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (review_id, utc_iso(), json.dumps(req.response), "valid"),
+            (review_id, utc_iso(), json.dumps(req.response), "valid", "manual-import"),
         )
         conn.commit()
     return {"review_id": review_id, "response": req.response}
+
+
+class AgentReviewRunRequest(BaseModel):
+    manual_stories: Optional[list[dict[str, Any]]] = None
+
+
+@app.post("/api/editorial/agent-review/run")
+def run_agent_review_via_api(req: Optional[AgentReviewRunRequest] = None):
+    """Agent Review in one click: build the packet, ask Claude, validate,
+    store. Replaces copy-paste to ChatGPT (the manual import still works)."""
+    built = build_review_packet((req.manual_stories if req else None) or [], refresh_archive=True)
+    packet = built["packet"]
+    prompt = SUPERVISOR_PROMPT.read_text(encoding="utf-8") if SUPERVISOR_PROMPT.exists() else ""
+    if not prompt:
+        raise HTTPException(status_code=500, detail="Supervisor prompt file is missing.")
+    try:
+        response, usage = run_agent_review(packet, prompt)
+    except Exception as exc:  # noqa: BLE001 -- surface API/cap/validation errors to the Desk
+        raise HTTPException(status_code=502, detail=f"Claude review failed: {exc.__class__.__name__}: {exc}") from exc
+    valid, errors = validate_agent_review_payload(response)
+    if not valid:
+        raise HTTPException(status_code=502, detail={"message": "Claude returned a malformed review.", "errors": errors})
+    review_id = str(uuid4())
+    with editorial_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO agent_reviews (id, imported_at, raw_json, validation_status, packet_json, source, usage_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (review_id, utc_iso(), json.dumps(response), "valid", json.dumps(built), "claude-api", json.dumps(usage)),
+        )
+        conn.commit()
+    return {"review_id": review_id, "response": response, "packet": built, "usage": usage}
+
+
+@app.get("/api/editorial/agent-review/latest")
+def get_latest_agent_review():
+    with editorial_conn() as conn:
+        row = conn.execute(
+            "SELECT id, imported_at, raw_json, packet_json, source, usage_json FROM agent_reviews ORDER BY imported_at DESC LIMIT 1"
+        ).fetchone()
+    if not row:
+        return {"review": None}
+    return {
+        "review": {
+            "review_id": row[0],
+            "imported_at": row[1],
+            "response": json.loads(row[2]),
+            "packet": json.loads(row[3]) if row[3] else None,
+            "source": row[4] or "manual-import",
+            "usage": json.loads(row[5]) if row[5] else None,
+        }
+    }
+
+
+@app.get("/api/editorial/today")
+def get_today_board():
+    meta, leads = trend_leads()
+    return {"trend_scan": meta, "trend_leads": leads, "decisions": get_decisions()}
 
 
 @app.post("/api/editorial/decisions")
@@ -1700,7 +1778,7 @@ def save_editorial_decision(req: EditorialDecisionRequest):
                 decided_at=now,
             )
         if req.decision == "commission":
-            upsert_production_queue_item(conn, req.lead_id)
+            upsert_production_queue_item(conn, req.lead_id, lead=lead)
         conn.commit()
     return {"lead_id": req.lead_id, "decision": req.decision, "note": req.note or "", "updated_at": now}
 
@@ -1717,7 +1795,7 @@ def get_production_queue():
 
 @app.post("/api/editorial/production-queue/{lead_id:path}/writing-packet")
 def prepare_writing_packet(lead_id: str, req: Optional[WritingPacketRequest] = None):
-    lead = req.lead if req else None
+    lead = (req.lead if req else None) or find_lead_by_id(lead_id)
     assessment = req.assessment if req else None
     packet = build_writing_packet(lead_id, lead, assessment)
     now = utc_iso()

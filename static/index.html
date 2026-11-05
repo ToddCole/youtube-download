@@ -102,6 +102,21 @@
           <button class="btn btn-secondary" onclick="refreshEditorialResults()">Refresh Results</button>
         </div>
 
+        <div class="desk-panel today-panel">
+          <div class="panel-heading">
+            <div>
+              <h2>Today</h2>
+              <p id="today-meta">Claude's picks from the latest news scan.</p>
+            </div>
+            <span id="pipeline-status" class="small-muted"></span>
+          </div>
+          <div id="today-list" class="recommendations-list empty-state">No Claude news scan yet. Scans run at 07:05 and 16:05.</div>
+          <details id="today-watchlist" class="rejected-panel hidden">
+            <summary>Watchlist</summary>
+            <ul id="today-watchlist-items"></ul>
+          </details>
+        </div>
+
         <div class="desk-controls">
           <button class="btn btn-primary" onclick="runEditorialScan('creator')">Run YouTube Intelligence Scanner</button>
           <button class="btn btn-primary" onclick="runEditorialScan('news')">Run News Scanner</button>
@@ -121,10 +136,12 @@
           <div class="panel-heading">
             <div>
               <h2>Agent Review</h2>
-              <p>Prepare candidates for manual agent annotation, then import the JSON response.</p>
+              <p>Claude assesses every scanner lead and proposes a slate. The manual copy-paste route below still works.</p>
             </div>
             <div class="review-action-stack">
-              <button id="prepare-review-btn" class="btn btn-secondary" onclick="prepareAgentReview()">Prepare Agent Review</button>
+              <button id="run-claude-review-btn" class="btn btn-primary" onclick="runClaudeReview()">Run Agent Review with Claude</button>
+              <span id="claude-review-status" class="small-muted hidden" aria-live="polite"></span>
+              <button id="prepare-review-btn" class="btn btn-secondary" onclick="prepareAgentReview()">Prepare packet (manual)</button>
               <span id="prepare-review-status" class="small-muted hidden" aria-live="polite"></span>
             </div>
           </div>

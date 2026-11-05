@@ -664,8 +664,151 @@ function allPacketCandidates() {
   return ["creator", "news", "research", "manual"].flatMap((key) => grouped[key] || []);
 }
 
+// --- Today board (Claude news scan picks) ---------------------------------
+let todayBoard = null;
+
+async function refreshToday() {
+  try {
+    const [todayRes, pipeRes] = await Promise.all([
+      fetch("/api/editorial/today"),
+      fetch("/api/editorial/pipeline/status"),
+    ]);
+    todayBoard = await todayRes.json();
+    if (todayBoard.decisions) {
+      if (!editorialResults) editorialResults = {};
+      editorialResults.decisions = { ...(editorialResults.decisions || {}), ...todayBoard.decisions };
+    }
+    renderToday();
+    if (pipeRes.ok) renderPipelineStatus(await pipeRes.json());
+  } catch (e) {
+    showEditorialError(`Today board: ${e.message}`);
+  }
+}
+
+function renderPipelineStatus(data) {
+  const el = document.getElementById("pipeline-status");
+  if (!el) return;
+  const last = (data.runs || [])[0];
+  const spend = `Claude today US$${(data.claude_spent_today_usd || 0).toFixed(2)} of $${(data.claude_daily_cap_usd || 0).toFixed(2)}`;
+  if (!last) {
+    el.textContent = `No scheduled run yet · ${spend}`;
+    return;
+  }
+  const problems = (last.problems || []).length ? ` · ${last.problems.length} issue(s): ${last.problems[0]}` : "";
+  el.textContent = `Last cycle ${shortDate(last.finished_at || last.started_at)}: ${last.status}${problems} · ${spend}`;
+}
+
+function confidenceRating(confidence) {
+  return { high: "Strong", medium: "Possible" }[confidence] || "Weak";
+}
+
+function renderToday() {
+  const list = document.getElementById("today-list");
+  const metaEl = document.getElementById("today-meta");
+  if (!list) return;
+  const meta = todayBoard?.trend_scan;
+  const leads = todayBoard?.trend_leads || [];
+  if (meta) {
+    const cost = meta.cost_usd != null ? ` · US$${Number(meta.cost_usd).toFixed(2)}` : "";
+    metaEl.textContent = `Claude news scan ${shortDate(meta.generated_at)} · ${meta.packet_size || "?"} signals read${cost}`;
+  }
+  list.className = leads.length ? "recommendations-list" : "recommendations-list empty-state";
+  list.replaceChildren();
+  if (!leads.length) {
+    list.textContent = "No Claude news scan yet. Scans run at 07:05 and 16:05.";
+  }
+  leads.forEach((lead) => {
+    const decision = editorialResults?.decisions?.[lead.lead_id]?.decision || "";
+    const saving = savingDecisionIds.has(lead.lead_id);
+    const evidence = (lead.evidence || []).slice(0, 6).map((e) =>
+      `<li><a href="${escapeAttr(e.url || "#")}" target="_blank" rel="noopener">${escapeHtml(e.title || e.url || "")}</a> <span class="small-muted">${escapeHtml(e.source || "")} · ${escapeHtml(shortDate(e.published_at))}</span></li>`
+    ).join("");
+    const related = (lead.related_mfo_pages || []).map((page) =>
+      `<a href="${escapeAttr(page.url)}" target="_blank" rel="noopener">${escapeHtml(page.title)}</a>`
+    ).join(" · ");
+    const checks = [...(lead.verification_needed || []), ...(lead.editorial_cautions || [])];
+    const card = document.createElement("article");
+    card.className = "recommendation-card";
+    card.innerHTML = `
+      <div class="lead-meta-row">
+        <span class="source-pill">#${escapeHtml(String(lead.rank || ""))}</span>
+        <span class="rating-pill rating-${confidenceRating(lead.confidence)}">${escapeHtml(lead.confidence || "")} confidence</span>
+        <span>${escapeHtml(lead.evidence_strength || "")} evidence · ${escapeHtml(String(lead.independent_sources ?? ""))} sources · ${escapeHtml((lead.lanes || []).join(", "))}</span>
+        ${decision ? `<span class="decision-pill decision-${escapeAttr(decision)}">${decisionLabel(decision)}</span>` : ""}
+        ${saving ? `<span>Saving...</span>` : ""}
+      </div>
+      <h3>${escapeHtml(lead.title)}</h3>
+      <dl class="recommendation-grid">
+        <div><dt>What it is</dt><dd>${escapeHtml(lead.source_summary || "")}</dd></div>
+        <div><dt>Why now</dt><dd>${escapeHtml(lead.why_moving_now || "")}</dd></div>
+        <div><dt>MFO angle</dt><dd>${escapeHtml(lead.likely_mfo_angle || "")}</dd></div>
+        <div><dt>Check first</dt><dd>${checks.length ? escapeHtml(checks.join(" · ")) : "Nothing flagged"}</dd></div>
+        <div><dt>Already on MFO?</dt><dd>${related || "No close match in the archive"}</dd></div>
+      </dl>
+      <details><summary>Evidence (${(lead.evidence || []).length})</summary><ul class="evidence-list">${evidence}</ul></details>
+      <div class="lead-actions">${decisionButtons(lead.lead_id, decision, saving)}</div>
+    `;
+    list.appendChild(card);
+  });
+  const watch = meta?.watchlist || [];
+  const watchEl = document.getElementById("today-watchlist");
+  if (watchEl) {
+    watchEl.classList.toggle("hidden", !watch.length);
+    document.getElementById("today-watchlist-items").innerHTML = watch.map((w) => `<li>${escapeHtml(w)}</li>`).join("");
+  }
+}
+
+// --- Agent Review via Claude API ------------------------------------------
+async function runClaudeReview() {
+  const button = document.getElementById("run-claude-review-btn");
+  const status = document.getElementById("claude-review-status");
+  hideEditorialError();
+  button.disabled = true;
+  status.classList.remove("hidden");
+  status.textContent = "Claude is reviewing every lead (usually 1-3 minutes)...";
+  try {
+    const res = await fetch("/api/editorial/agent-review/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ manual_stories: manualStories }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(getErrorMessage(data, "Claude review failed"));
+    reviewPacket = data.packet;
+    lastAgentReview = data.response;
+    renderAgentReview(lastAgentReview);
+    const cost = data.usage?.cost_usd != null ? ` · US$${Number(data.usage.cost_usd).toFixed(2)}` : "";
+    status.textContent = `Reviewed ${(data.response.reviewed_candidates || []).length} leads, ${(data.response.recommended_ids || []).length} recommended${cost}.`;
+    refreshToday();
+  } catch (e) {
+    status.textContent = "Review failed.";
+    showEditorialError(e.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function loadLatestAgentReview() {
+  try {
+    const res = await fetch("/api/editorial/agent-review/latest");
+    const data = await res.json();
+    const review = data.review;
+    if (!review) return;
+    if (review.packet) reviewPacket = review.packet;
+    lastAgentReview = review.response;
+    renderAgentReview(lastAgentReview);
+    const status = document.getElementById("claude-review-status");
+    if (status) {
+      status.classList.remove("hidden");
+      status.textContent = `Last review ${shortDate(review.imported_at)} (${review.source === "claude-api" ? "Claude" : "manual import"}).`;
+    }
+  } catch (e) {
+    // non-fatal: the Desk still works without a stored review
+  }
+}
+
 function allKnownLeads() {
-  const packetLeads = allPacketCandidates();
+  const packetLeads = [...allPacketCandidates(), ...(todayBoard?.trend_leads || [])];
   const resultLeads = ["creator", "news", "research"].flatMap((key) => editorialResults?.[key]?.leads || []);
   const manualLeads = manualStoryLeadFallbacks();
   const map = new Map();
@@ -708,6 +851,7 @@ function applyProductionQueueLocally(item) {
 }
 
 function renderDecisionSurfaces() {
+  renderToday();
   if (lastAgentReview) renderAgentReview(lastAgentReview);
   if (editorialResults) renderLeadInbox(editorialResults);
   renderProductionQueue();
@@ -903,3 +1047,5 @@ function escapeAttr(value) {
 }
 
 refreshEditorialResults();
+refreshToday();
+loadLatestAgentReview();

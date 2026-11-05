@@ -10,3 +10,6 @@ scanner/reports/
 scanner/trend_radar.db
 scanner/trend_radar.db-shm
 scanner/trend_radar.db-wal
+
+# secrets
+.env

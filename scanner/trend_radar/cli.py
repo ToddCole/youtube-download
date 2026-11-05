@@ -6,6 +6,7 @@ against the default path to be exercised end-to-end.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -63,8 +64,40 @@ def cmd_add_manual(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_claude_scan(args: argparse.Namespace) -> int:
+    # Imported lazily (not at module top-level) so `collect`/`add-manual`
+    # never require the anthropic package to be installed, and so
+    # nothing Claude-related is touched until this specific command
+    # actually runs.
+    from .claude_client import MissingApiKeyError
+    from .claude_scan import run_claude_scan
+
+    with db_module.connect(args.db) as conn:
+        try:
+            result = run_claude_scan(
+                conn,
+                model=args.model,
+                lookback_days=args.lookback_days,
+                max_signals=args.max_signals,
+                skip_expansion=args.skip_expansion,
+                dry_run_packet=args.dry_run_packet,
+            )
+        except MissingApiKeyError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+
+    output_path = Path(args.output) if args.output else None
+    text = json.dumps(result, ensure_ascii=False, indent=2)
+    if output_path:
+        output_path.write_text(text, encoding="utf-8")
+        print(f"Wrote {output_path}")
+    else:
+        print(text)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="trend_radar", description="MFO Fitness Trend Radar (Phase 1: raw collection)")
+    parser = argparse.ArgumentParser(prog="trend_radar", description="MFO Fitness Trend Radar (raw collection + Claude-powered editorial scan)")
     parser.add_argument("--db", type=Path, default=None, help="Path to the Trend Radar SQLite database (default: scanner/trend_radar.db)")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -79,6 +112,15 @@ def build_parser() -> argparse.ArgumentParser:
     manual_p.add_argument("--platform", default=None, help="Observed platform, e.g. instagram, tiktok, facebook, google")
     manual_p.add_argument("--observed-at", default=None, help="ISO timestamp, if known")
     manual_p.set_defaults(func=cmd_add_manual)
+
+    claude_p = sub.add_parser("claude-scan", help="Run the Claude-powered two-pass editorial radar scan")
+    claude_p.add_argument("--output", default=None, help="Path to write the resulting JSON (default: stdout)")
+    claude_p.add_argument("--model", default=None, help="Override the model (default: MFO_TREND_MODEL env var, then claude-sonnet-5)")
+    claude_p.add_argument("--lookback-days", type=int, default=7, help="How many days of raw signals to include (default: 7)")
+    claude_p.add_argument("--max-signals", type=int, default=400, help="Cap on evidence packet size (default: 400)")
+    claude_p.add_argument("--dry-run-packet", action="store_true", help="Build and report the evidence packet without calling Claude")
+    claude_p.add_argument("--skip-expansion", action="store_true", help="Skip the controlled expansion step")
+    claude_p.set_defaults(func=cmd_claude_scan)
 
     return parser
 

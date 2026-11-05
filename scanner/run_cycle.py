@@ -128,10 +128,15 @@ def send_alert(title: str, body: str, priority: str = "default") -> bool:
         method="POST",
     )
     try:
-        with urlopen(request, timeout=10):
+        import ssl
+
+        import certifi
+
+        context = ssl.create_default_context(cafile=certifi.where())
+        with urlopen(request, timeout=10, context=context):
             return True
     except Exception as exc:  # noqa: BLE001
-        print(f"WARNING: ntfy alert failed: {exc.__class__.__name__}", file=sys.stderr)
+        print(f"WARNING: ntfy alert failed: {exc.__class__.__name__}: {getattr(exc, 'reason', exc)}", file=sys.stderr)
         return False
 
 

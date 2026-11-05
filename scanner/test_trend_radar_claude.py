@@ -383,11 +383,123 @@ class NoForbiddenTermsTests(unittest.TestCase):
 # --- End-to-end orchestration with a fully mocked client -----------------
 
 class EndToEndMockedScanTests(ClaudeTestCase):
-    def _fake_parsed_response(self, parsed_output, input_tokens=10, output_tokens=10):
+    def _fake_parsed_response(self, parsed_output, input_tokens=10, output_tokens=10, stop_reason="end_turn", text=None):
+        """A streamed final message: JSON text block + usage + stop_reason."""
         response = mock.Mock()
-        response.parsed_output = parsed_output
-        response.usage = mock.Mock(input_tokens=input_tokens, output_tokens=output_tokens)
+        block = mock.Mock(type="text")
+        block.text = text if text is not None else parsed_output.model_dump_json()
+        response.content = [mock.Mock(type="thinking"), block]
+        response.stop_reason = stop_reason
+        response.usage = mock.Mock(input_tokens=input_tokens, output_tokens=output_tokens,
+                                   cache_read_input_tokens=0, cache_creation_input_tokens=0)
         return response
+
+    def _client_returning(self, *responses):
+        fake_client = mock.Mock()
+        stream_cm = mock.MagicMock()
+        stream_cm.__enter__.return_value.get_final_message.side_effect = list(responses)
+        fake_client.messages.stream.return_value = stream_cm
+        return fake_client
+
+    def _run(self, conn, fake_client, **kwargs):
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), \
+             mock.patch("trend_radar.claude_scan.build_client", return_value=fake_client):
+            from trend_radar.claude_scan import run_claude_scan
+
+            return run_claude_scan(conn, skip_expansion=True, **kwargs)
+
+    def _cand(self, rank, ids):
+        return Candidate(rank=rank, headline=f"h{rank}", topic_summary="s", why_moving_now="w", mfo_angle="a",
+                         confidence="low", evidence_strength="weak", lanes=["publisher"], independent_sources=1,
+                         evidence=[EvidenceItem(signal_id=i, relevance="core") for i in ids])
+
+    def test_short_refs_are_sent_and_mapped_back_with_repairs_logged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = self.connect(Path(tmp) / "t.db")
+            self.seed_source_and_run(conn)
+            sig1 = self.add_signal(conn, url="https://example.com/one", title="Story one", author_or_account="Fixture Publisher")
+            discovery = DiscoveryOutput(waves=[
+                DiscoveryWave(wave_id="wave-1", working_label="A", signal_ids=["S001", "S999"], cross_source_reasoning="x"),
+                DiscoveryWave(wave_id="wave-2", working_label="B", signal_ids=["S777"], cross_source_reasoning="x"),
+            ])
+            editorial = ClaudeScanOutput(corpus_summary="c", candidates=[
+                self._cand(1, ["S001"]), self._cand(2, ["S001", "S555"]), self._cand(3, ["S001"]), self._cand(4, ["S404"]),
+            ])
+            client = self._client_returning(self._fake_parsed_response(discovery), self._fake_parsed_response(editorial))
+            result = self._run(conn, client)
+
+            sent = client.messages.stream.call_args_list[0].kwargs["messages"][0]["content"]
+            self.assertIn('"signal_id": "S001"', sent)
+            self.assertNotIn(sig1, sent)
+            self.assertNotIn("https://example.com/one", sent)
+
+            self.assertEqual([c["rank"] for c in result["candidates"]], [1, 2, 3])
+            first = result["candidates"][0]["evidence"][0]
+            self.assertEqual(first["signal_id"], sig1)
+            self.assertEqual(first["url"], "https://example.com/one")
+            self.assertEqual(first["source"], "Fixture Publisher")
+            self.assertEqual([w["wave_id"] for w in result["_discovery_waves"]], ["wave-1"])
+            joined = " ".join(result["_validation_repairs"])
+            for marker in ("S999", "wave-2", "S555", "S404"):
+                self.assertIn(marker, joined)
+
+    def test_truncated_response_reports_stop_reason(self):
+        from trend_radar.claude_client import ClaudeOutputError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = self.connect(Path(tmp) / "t.db")
+            self.seed_source_and_run(conn)
+            self.add_signal(conn, url="https://example.com/one", title="Story one")
+            dummy = DiscoveryOutput(waves=[])
+            client = self._client_returning(self._fake_parsed_response(dummy, stop_reason="max_tokens", text='{"waves":[{"wave'))
+            with self.assertRaisesRegex(ClaudeOutputError, "truncated"):
+                self._run(conn, client)
+
+    def test_spend_cap_blocks_call_before_it_is_made(self):
+        from trend_radar.claude_client import SpendCapReached, SpendLedger
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = self.connect(Path(tmp) / "t.db")
+            self.seed_source_and_run(conn)
+            self.add_signal(conn, url="https://example.com/one", title="Story one")
+            ledger = SpendLedger(Path(tmp) / "spend.json", daily_cap_usd=0.01)
+            client = self._client_returning()
+            with self.assertRaises(SpendCapReached):
+                self._run(conn, client, ledger=ledger)
+            client.messages.stream.assert_not_called()
+
+    def test_ledger_records_actual_cost(self):
+        from trend_radar.claude_client import SpendLedger
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = self.connect(Path(tmp) / "t.db")
+            self.seed_source_and_run(conn)
+            self.add_signal(conn, url="https://example.com/one", title="Story one")
+            discovery = DiscoveryOutput(waves=[DiscoveryWave(wave_id="w", working_label="A", signal_ids=["S001"], cross_source_reasoning="x")])
+            editorial = ClaudeScanOutput(corpus_summary="c", candidates=[self._cand(i, ["S001"]) for i in (1, 2, 3)])
+            ledger = SpendLedger(Path(tmp) / "spend.json", daily_cap_usd=50)
+            client = self._client_returning(
+                self._fake_parsed_response(discovery, input_tokens=1_000_000, output_tokens=0),
+                self._fake_parsed_response(editorial, input_tokens=0, output_tokens=100_000),
+            )
+            result = self._run(conn, client, ledger=ledger)
+            self.assertAlmostEqual(ledger.spent_today(), 3.0, places=4)  # $2 in + $1 out
+            self.assertAlmostEqual(result["usage"]["cost_usd"], 3.0, places=4)
+
+    def test_editorial_retries_once_when_too_few_candidates_survive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = self.connect(Path(tmp) / "t.db")
+            self.seed_source_and_run(conn)
+            self.add_signal(conn, url="https://example.com/one", title="Story one")
+            discovery = DiscoveryOutput(waves=[DiscoveryWave(wave_id="w", working_label="A", signal_ids=["S001"], cross_source_reasoning="x")])
+            thin = ClaudeScanOutput(corpus_summary="c", candidates=[self._cand(1, ["S001"])])
+            good = ClaudeScanOutput(corpus_summary="c", candidates=[self._cand(i, ["S001"]) for i in (1, 2, 3)])
+            client = self._client_returning(*(self._fake_parsed_response(o) for o in (discovery, thin, good)))
+            result = self._run(conn, client)
+            self.assertEqual(len(result["candidates"]), 3)
+            self.assertEqual(result["usage"]["api_calls"], 3)
+            retry_prompt = client.messages.stream.call_args_list[2].kwargs["messages"][0]["content"]
+            self.assertIn("could not be used", retry_prompt)
 
     def test_full_two_pass_run_with_mocked_client(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -412,11 +524,10 @@ class EndToEndMockedScanTests(ClaudeTestCase):
                 ],
             )
 
-            fake_client = mock.Mock()
-            fake_client.messages.parse.side_effect = [
+            fake_client = self._client_returning(
                 self._fake_parsed_response(discovery_output),
                 self._fake_parsed_response(editorial_output),
-            ]
+            )
 
             with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), \
                  mock.patch("trend_radar.claude_scan.build_client", return_value=fake_client):

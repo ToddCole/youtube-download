@@ -27,6 +27,7 @@ from xml.etree import ElementTree
 
 import yt_dlp
 
+import settings  # noqa: F401  (loads .env)
 import editorial_gates
 
 
@@ -259,6 +260,13 @@ class NewsItem:
     published: str | None
     summary: str = ""
     source_type: str = "rss"
+    # Real publisher domain. Google News items link to news.google.com
+    # redirects, so this comes from the RSS <source url="..."> element.
+    publisher_domain: str = ""
+
+
+def item_domain(item: "NewsItem") -> str:
+    return item.publisher_domain or domain_for(item.url)
 
 
 @dataclass
@@ -432,7 +440,11 @@ def http_get(url: str, timeout: int = 20) -> tuple[str, dict[str, str]]:
     except URLError as exc:
         if "CERTIFICATE_VERIFY_FAILED" not in str(exc):
             raise
-        context = ssl._create_unverified_context()
+        # python.org Python ships without system CA certs; retry with the
+        # certifi bundle rather than disabling verification.
+        import certifi
+
+        context = ssl.create_default_context(cafile=certifi.where())
         with urlopen(request, timeout=timeout, context=context) as response:
             return response.read().decode("utf-8", errors="replace"), dict(response.headers)
 
@@ -587,10 +599,9 @@ def fetch_wordpress_posts(site_url: str, creator_lexicon: dict[str, list[str]] |
             total_header = headers.get("X-WP-TotalPages") or headers.get("x-wp-totalpages")
             if total_header:
                 total_pages = int(total_header)
-        except Exception:
-            if page_num == 1:
-                raise
-            break
+        except Exception as exc:
+            # A partial crawl must never replace a complete cached index.
+            raise ValueError(f"WordPress posts crawl failed on page {page_num}: {exc}") from exc
         if not isinstance(posts, list) or not posts:
             break
         for post in posts:
@@ -657,6 +668,18 @@ def fetch_sitemap_posts(site_url: str, max_sitemaps: int = 12) -> list[MfoPage]:
     return pages
 
 
+MFO_INDEX_MIN_KEEP_RATIO = 0.9
+
+
+def _cached_index_page_count(index_path: Path) -> int:
+    try:
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    pages = payload.get("pages") if isinstance(payload, dict) else None
+    return len(pages) if isinstance(pages, list) else 0
+
+
 def refresh_mfo_index(site_url: str, index_path: Path, creator_lexicon: dict[str, list[str]] | None = None) -> dict[str, Any]:
     try:
         pages = fetch_wordpress_posts(site_url, creator_lexicon)
@@ -665,6 +688,12 @@ def refresh_mfo_index(site_url: str, index_path: Path, creator_lexicon: dict[str
         pages = fetch_sitemap_posts(site_url)
         source = "sitemap"
     payload = index_payload(pages, site_url, source)
+    previous_count = _cached_index_page_count(index_path)
+    if previous_count and len(pages) < previous_count * MFO_INDEX_MIN_KEEP_RATIO:
+        raise ValueError(
+            f"MFO index refresh ({source}) returned {len(pages)} pages vs {previous_count} cached; "
+            "keeping the cached index"
+        )
     index_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return payload
 
@@ -675,6 +704,16 @@ def load_mfo_index(index_path: Path, site_url: str, refresh: bool = False, creat
             return refresh_mfo_index(site_url, index_path, creator_lexicon)
         except (URLError, TimeoutError, OSError, ValueError) as exc:
             print(f"Warning: could not refresh MFO index: {exc}", file=sys.stderr)
+            if index_path.exists():
+                try:
+                    payload = json.loads(index_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    payload = None
+                if isinstance(payload, dict):
+                    payload["archive_warning"] = f"Using cached MFO archive after refresh failed: {exc}"
+                    payload["source"] = f"{payload.get('source', 'cache')}-cached"
+                    payload.setdefault("source_fingerprint_count", 0)
+                    return payload
             return {
                 "site_url": site_url.rstrip("/"),
                 "source": "unavailable",
@@ -1771,8 +1810,12 @@ def rss_items_from_xml(xml_text: str, source_name: str, source_type: str) -> lis
                 item_source_url = child.attrib.get("url") or item_source_url
         if title and link:
             url = clean_url(link) or clean_url(item_source_url) or link
-            items.append(NewsItem(title=title, url=url, source=item_source, published=published, summary=summary, source_type=source_type))
+            publisher_domain = domain_for(item_source_url) if item_source_url else ""
+            items.append(NewsItem(title=title, url=url, source=item_source, published=published, summary=summary, source_type=source_type, publisher_domain=publisher_domain))
     return items
+
+
+GOOGLE_NEWS_WINDOW = "7d"  # Google News search operator; without it results can be months old
 
 
 def load_news_items(sources_path: Path, queries_path: Path) -> tuple[list[NewsItem], list[str]]:
@@ -1799,7 +1842,11 @@ def load_news_items(sources_path: Path, queries_path: Path) -> tuple[list[NewsIt
             q = str(query)
         if not q:
             continue
-        url = f"https://news.google.com/rss/search?q={quote_plus(q)}&hl=en-AU&gl=AU&ceid=AU:en"
+        if "when:" not in q:
+            q_dated = f"{q} when:{GOOGLE_NEWS_WINDOW}"
+        else:
+            q_dated = q
+        url = f"https://news.google.com/rss/search?q={quote_plus(q_dated)}&hl=en-AU&gl=AU&ceid=AU:en"
         try:
             items.extend(rss_items_from_xml(http_get_text(url), f"Google News: {q}", "google-news"))
         except Exception as exc:
@@ -1920,7 +1967,7 @@ def first_seen_for(conn: sqlite3.Connection, cluster: NewsCluster, fallback: str
 
 
 def source_preference_rank(item: NewsItem) -> int:
-    domain = domain_for(item.url)
+    domain = item_domain(item)
     if "youtube.com" in domain or "youtu.be" in domain:
         return 4
     if item.source_type in {"official", "organisation", "journal"}:
@@ -1941,12 +1988,13 @@ def primary_news_item(cluster: NewsCluster) -> NewsItem:
 
 
 def independent_domains(cluster: NewsCluster) -> set[str]:
-    domains = {domain_for(item.url) for item in cluster.items}
+    domains = {item_domain(item) for item in cluster.items}
+    domains.discard("news.google.com")
     return {domain for domain in domains if not any(domain.endswith(press) for press in PRESS_RELEASE_DOMAINS)}
 
 
 def syndicated_count(cluster: NewsCluster) -> int:
-    return len({domain_for(item.url) for item in cluster.items}) - len(independent_domains(cluster))
+    return len({item_domain(item) for item in cluster.items} - {"news.google.com"}) - len(independent_domains(cluster))
 
 
 def australian_relevance(cluster: NewsCluster) -> int:
@@ -2046,8 +2094,8 @@ def age_hours_for_cluster(cluster: NewsCluster) -> float | None:
 
 
 def independent_pickup_domains(cluster: NewsCluster) -> set[str]:
-    primary_domain = domain_for(primary_news_item(cluster).url)
-    feed_domains = {domain_for(item.url) for item in cluster.items if item.source.startswith("Google News:")}
+    primary_domain = item_domain(primary_news_item(cluster))
+    feed_domains = {"news.google.com"}
     domains = independent_domains(cluster)
     return {domain for domain in domains if domain and domain != primary_domain and domain not in feed_domains}
 
@@ -2290,7 +2338,7 @@ def what_changed_now(cluster: NewsCluster) -> str | None:
 
 def news_momentum(cluster: NewsCluster) -> int:
     domains = independent_domains(cluster)
-    pickups = len({domain_for(item.url) for item in cluster.items})
+    pickups = len({item_domain(item) for item in cluster.items})
     momentum = min(20, 5 + pickups * 4 + len(domains) * 3)
     age_hours = newest_age_hours(cluster)
     if is_profile_story(cluster) and (age_hours is None or age_hours > 72):
@@ -4812,6 +4860,7 @@ def main() -> int:
         return 0
 
     scan_kind = args.scan_kind or ("manual" if args.limit is not None else "scheduled")
+    exit_code = 0
     generated_reports: list[Path] = []
     if not args.skip_creator:
         channels = load_channels(args.channels)
@@ -4833,17 +4882,16 @@ def main() -> int:
             print(f"Research report: {args.research_report}")
             generated_reports.append(args.research_report)
         except Exception as exc:
-            print(f"Research Radar failed: {exc}", file=sys.stderr)
-            if not args.skip_creator or not args.skip_news:
-                pass
-            else:
+            print(f"ERROR: Research Radar failed: {exc}", file=sys.stderr)
+            if args.skip_creator and args.skip_news:
                 return 1
+            exit_code = 2  # partial failure: other reports were still written
     print(f"Database: {args.db}")
     if mfo_index:
         print(f"MFO index: {args.mfo_index}")
     if should_auto_open_reports(args):
         open_reports_in_word(generated_reports)
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

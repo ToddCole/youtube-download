@@ -38,7 +38,9 @@ EDITORIAL_GATES_CONFIG_PATH = SCANNER_DIR / "editorial_gates_config.json"
 
 if str(SCANNER_DIR) not in sys.path:
     sys.path.insert(0, str(SCANNER_DIR))
+import settings  # noqa: E402,F401  (loads .env)
 import editorial_gates  # noqa: E402
+from cycle_lock import LockBusy, cycle_lock  # noqa: E402
 STALE_HOURS = 14
 VERY_STALE_HOURS = 24
 
@@ -1045,18 +1047,23 @@ def run_scanner_job(job_id: str, scanner_type: str) -> None:
         args.extend(["--skip-creator", "--skip-news"])
 
     try:
-        result = subprocess.run(
-            args,
-            cwd=str(SCANNER_DIR),
-            capture_output=True,
-            text=True,
-            timeout=1800,
-            check=False,
-        )
+        with cycle_lock(f"Desk {scanner_type} scan"):
+            result = subprocess.run(
+                args,
+                cwd=str(SCANNER_DIR),
+                capture_output=True,
+                text=True,
+                timeout=1800,
+                check=False,
+            )
         finished_at = utc_iso()
         if result.returncode == 0:
             status = "completed"
-            error = ""
+            # Keep warnings visible even on success (e.g. archive refresh fell back to cache).
+            error = concise_scanner_error("", result.stderr) if (result.stderr or "").strip() else ""
+        elif result.returncode == 2:
+            status = "partial"
+            error = concise_scanner_error(result.stdout, result.stderr)
         else:
             status = "failed"
             error = concise_scanner_error(result.stdout, result.stderr)
@@ -1068,6 +1075,11 @@ def run_scanner_job(job_id: str, scanner_type: str) -> None:
                 "error": error,
             }
         )
+    except LockBusy as exc:
+        finished_at = utc_iso()
+        status = "failed"
+        error = f"Scheduled cycle is running ({exc}); try again in a few minutes."
+        editorial_jobs[job_id].update({"status": status, "finished_at": finished_at, "error": error})
     except subprocess.TimeoutExpired:
         finished_at = utc_iso()
         status = "failed"
@@ -1583,6 +1595,48 @@ def get_editorial_scan_status():
     }
 
 
+TREND_DB = SCANNER_DIR / "trend_radar.db"
+
+
+@app.get("/api/editorial/trends/latest")
+def get_latest_trend_scan():
+    """Latest Claude Trend Radar scan (persisted by `trend_radar claude-scan`)."""
+    from trend_radar.scan_store import latest_scan
+
+    if not TREND_DB.exists():
+        return {"scan": None}
+    conn = sqlite3.connect(TREND_DB)
+    try:
+        return {"scan": latest_scan(conn)}
+    finally:
+        conn.close()
+
+
+@app.get("/api/editorial/pipeline/status")
+def get_pipeline_status():
+    """Recent scheduled-cycle runs (scanner/run_cycle.py) and today's Claude spend."""
+    from trend_radar.claude_client import SpendLedger
+
+    runs: list[dict] = []
+    with editorial_conn() as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pipeline_runs'"
+        ).fetchone()
+        if exists:
+            rows = conn.execute(
+                "SELECT id, started_at, finished_at, status, steps_json, problems_json, claude_cost_usd "
+                "FROM pipeline_runs ORDER BY id DESC LIMIT 10"
+            ).fetchall()
+            for row in rows:
+                runs.append({
+                    "id": row[0], "started_at": row[1], "finished_at": row[2], "status": row[3],
+                    "steps": json.loads(row[4] or "[]"), "problems": json.loads(row[5] or "[]"),
+                    "claude_cost_usd": row[6],
+                })
+    ledger = SpendLedger()
+    return {"runs": runs, "claude_spent_today_usd": round(ledger.spent_today(), 4), "claude_daily_cap_usd": ledger.daily_cap_usd}
+
+
 @app.get("/api/editorial/results")
 def get_editorial_results():
     return {
@@ -1812,4 +1866,4 @@ def index():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8090)
+    uvicorn.run(app, host=os.getenv("MFO_DESK_HOST", "127.0.0.1"), port=8090)

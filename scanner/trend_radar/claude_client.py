@@ -13,11 +13,16 @@ token counts only.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
 import anthropic
+from anthropic.lib._parse._transform import transform_schema  # same schema transform messages.parse() uses
+from pydantic import ValidationError
 
 DEFAULT_MODEL = "claude-sonnet-5-5"
 
@@ -25,6 +30,25 @@ DEFAULT_MODEL = "claude-sonnet-5-5"
 class MissingApiKeyError(RuntimeError):
     """Raised when ANTHROPIC_API_KEY is unset. Never includes any key
     value in its message -- there is none available to include."""
+
+
+# US$ per million tokens: (input, output, cache_read, cache_write_5m).
+# Source: claude-api skill model table (cached 2026-10-06).
+PRICES_PER_MTOK: dict[str, tuple[float, float, float, float]] = {
+    "claude-sonnet-5-5": (2.00, 10.00, 0.20, 2.50),
+    "claude-sonnet-5": (2.00, 10.00, 0.20, 2.50),
+    "claude-opus-5-5": (4.00, 20.00, 0.20, 5.00),
+    "claude-haiku-5-5": (0.10, 0.50, 0.01, 0.125),
+}
+FALLBACK_PRICE = (4.00, 20.00, 0.40, 5.00)  # deliberately pessimistic for unknown models
+
+
+def _int(value) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def price_for(model: str) -> tuple[float, float, float, float]:
+    return PRICES_PER_MTOK.get(model, FALLBACK_PRICE)
 
 
 @dataclass
@@ -38,13 +62,30 @@ class UsageTotals:
     api_calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
     elapsed_seconds: float = 0.0
 
-    def record(self, usage, elapsed: float) -> None:
+    def record(self, usage, elapsed: float) -> float:
+        """Adds one call's usage; returns that call's cost in US$."""
+        before = self.cost_usd
         self.api_calls += 1
         self.input_tokens += int(usage.input_tokens)
         self.output_tokens += int(usage.output_tokens)
+        self.cache_read_input_tokens += _int(getattr(usage, "cache_read_input_tokens", 0))
+        self.cache_creation_input_tokens += _int(getattr(usage, "cache_creation_input_tokens", 0))
         self.elapsed_seconds += elapsed
+        return self.cost_usd - before
+
+    @property
+    def cost_usd(self) -> float:
+        p_in, p_out, p_cr, p_cw = price_for(self.model)
+        return (
+            self.input_tokens * p_in
+            + self.output_tokens * p_out
+            + self.cache_read_input_tokens * p_cr
+            + self.cache_creation_input_tokens * p_cw
+        ) / 1_000_000
 
     def as_dict(self) -> dict:
         return {
@@ -52,8 +93,71 @@ class UsageTotals:
             "api_calls": self.api_calls,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
+            "cache_read_input_tokens": self.cache_read_input_tokens,
+            "cache_creation_input_tokens": self.cache_creation_input_tokens,
             "elapsed_seconds": round(self.elapsed_seconds, 3),
+            "cost_usd": round(self.cost_usd, 4),
         }
+
+
+class SpendCapReached(RuntimeError):
+    """Raised before a call that could push today's Claude spend over the cap."""
+
+
+class ClaudeOutputError(RuntimeError):
+    """Raised when a response was truncated (max_tokens), refused, or
+    could not be parsed into the requested schema."""
+
+
+DEFAULT_LEDGER_PATH = Path(__file__).resolve().parent.parent / "claude_spend.json"
+DEFAULT_DAILY_CAP_USD = 5.0
+
+
+class SpendLedger:
+    """Tiny per-day spend ledger (local date -> US$) shared by every paid
+    Claude call in this app, so a scheduler bug or a retry loop can never
+    burn the monthly credit."""
+
+    def __init__(self, path: Path = DEFAULT_LEDGER_PATH, daily_cap_usd: float | None = None):
+        self.path = Path(path)
+        cap_env = os.environ.get("MFO_CLAUDE_DAILY_CAP_USD")
+        self.daily_cap_usd = daily_cap_usd if daily_cap_usd is not None else float(cap_env or DEFAULT_DAILY_CAP_USD)
+
+    @staticmethod
+    def _today() -> str:
+        return datetime.now().strftime("%Y-%m-%d")
+
+    def _load(self) -> dict:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def spent_today(self) -> float:
+        return float(self._load().get(self._today(), 0.0))
+
+    def check(self, estimated_usd: float) -> None:
+        spent = self.spent_today()
+        if spent + estimated_usd > self.daily_cap_usd:
+            raise SpendCapReached(
+                f"daily Claude cap US${self.daily_cap_usd:.2f} would be exceeded "
+                f"(spent US${spent:.2f} today, next call could cost up to US${estimated_usd:.2f})"
+            )
+
+    def add(self, usd: float) -> None:
+        data = self._load()
+        today = self._today()
+        data[today] = round(float(data.get(today, 0.0)) + usd, 6)
+        keep = sorted(data)[-60:]
+        self.path.write_text(json.dumps({k: data[k] for k in keep}, indent=2) + "\n", encoding="utf-8")
+
+
+def estimate_call_cost(model: str, system: str, user_content: str, max_tokens: int) -> float:
+    """Upper-bound estimate: ~3 chars/token input, full max_tokens output."""
+    p_in, p_out, _, _ = price_for(model)
+    input_tokens = (len(system) + len(user_content)) / 3
+    return (input_tokens * p_in + max_tokens * p_out) / 1_000_000
 
 
 def resolve_model(explicit: str | None = None) -> str:
@@ -89,26 +193,56 @@ def call_structured(
     output_format: type,
     max_tokens: int,
     usage: UsageTotals,
+    ledger: SpendLedger | None = None,
+    effort: str | None = None,
 ):
-    """One structured-output call via the native Anthropic SDK's
-    Structured Outputs facility (messages.parse + output_format).
+    """One structured-output call, streamed (so large max_tokens can't hit
+    the SDK's non-streaming timeout guard).
 
-    No tools, no tool_choice, no assistant-role prefill message (the
-    only message sent is a single user turn), and no explicit
-    temperature/top_p/top_k -- every sampling parameter is left at the
-    SDK's default. Raises ValueError if the response has no parsed
-    structured output (should not happen with output_format set, but is
-    checked explicitly rather than letting a None propagate silently)."""
+    The JSON schema goes in output_config.format and the response text is
+    validated *after* the stream completes, so a truncated or refused
+    response is reported as such (ClaudeOutputError with the stop_reason)
+    instead of surfacing as an opaque JSON parse error.
+
+    No tools, no prefill, no sampling parameters. Thinking is the model's
+    default (adaptive); depth is steered with output_config.effort.
+    """
+    if ledger is not None:
+        ledger.check(estimate_call_cost(model, system, user_content, max_tokens))
+
+    output_config: dict = {
+        "format": {"type": "json_schema", "schema": transform_schema(output_format.model_json_schema())},
+    }
+    effort = effort or os.environ.get("MFO_TREND_EFFORT")
+    if effort:
+        output_config["effort"] = effort
+
     started = time.monotonic()
-    response = client.messages.parse(
+    with client.messages.stream(
         model=model,
         max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": user_content}],
-        output_format=output_format,
-    )
+        output_config=output_config,
+    ) as stream:
+        final = stream.get_final_message()
     elapsed = time.monotonic() - started
-    usage.record(response.usage, elapsed)
-    if response.parsed_output is None:
-        raise ValueError("Claude response did not include a parsed structured output")
-    return response.parsed_output
+    cost = usage.record(final.usage, elapsed)
+    if ledger is not None:
+        ledger.add(cost)
+
+    stop_reason = getattr(final, "stop_reason", None)
+    if stop_reason == "max_tokens":
+        raise ClaudeOutputError(f"response truncated at max_tokens={max_tokens}")
+    if stop_reason == "refusal":
+        details = getattr(final, "stop_details", None)
+        category = getattr(details, "category", None)
+        raise ClaudeOutputError(f"model refused the request (category: {category})")
+
+    text = "".join(block.text for block in final.content if getattr(block, "type", None) == "text")
+    if not text.strip():
+        raise ClaudeOutputError(f"response had no text output (stop_reason={stop_reason})")
+    try:
+        return output_format.model_validate_json(text)
+    except ValidationError as exc:
+        raise ClaudeOutputError(f"response did not match the {output_format.__name__} schema: {exc.errors()[:3]}") from exc

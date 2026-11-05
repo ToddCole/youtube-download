@@ -403,7 +403,7 @@
       "collection_interval_hours": 4,
       "reliability": 7,
       "source_role": "authority",
-      "active": true,
+      "active": false,
       "known_restrictions": "Confirmed during Phase 0: this channel currently has no accessible videos tab via yt-dlp flat extraction. Left active so this is recorded as a per-run collection error, not silently dropped -- revisit if it recovers.",
       "engagement_available": true
     },

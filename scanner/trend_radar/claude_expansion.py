@@ -69,7 +69,7 @@ def ensure_expansion_sources(conn: sqlite3.Connection) -> None:
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 source_id, name, lane, platform, "dynamic-query",
-                "claude_expansion", 0, None, "signal", 1,
+                "claude_expansion", 0, None, "signal", 0,  # inactive: query-driven, never polled by collect
                 "Query-driven, not a fixed feed/channel.", 0, "ok", "{}",
             ),
         )

@@ -3,3 +3,5 @@ uvicorn
 yt-dlp
 anthropic
 pydantic
+python-dotenv
+certifi

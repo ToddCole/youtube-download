@@ -69,9 +69,13 @@ def cmd_claude_scan(args: argparse.Namespace) -> int:
     # never require the anthropic package to be installed, and so
     # nothing Claude-related is touched until this specific command
     # actually runs.
-    from .claude_client import MissingApiKeyError
+    from .claude_client import ClaudeOutputError, MissingApiKeyError, SpendCapReached, SpendLedger
+    from .claude_discovery import DiscoveryValidationError
+    from .claude_editorial import EditorialValidationError
     from .claude_scan import run_claude_scan
+    from .scan_store import save_scan
 
+    ledger = None if (args.no_spend_cap or args.dry_run_packet) else SpendLedger()
     with db_module.connect(args.db) as conn:
         try:
             result = run_claude_scan(
@@ -81,10 +85,23 @@ def cmd_claude_scan(args: argparse.Namespace) -> int:
                 max_signals=args.max_signals,
                 skip_expansion=args.skip_expansion,
                 dry_run_packet=args.dry_run_packet,
+                ledger=ledger,
             )
         except MissingApiKeyError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
+        except SpendCapReached as exc:
+            print(f"ERROR: spend cap: {exc}", file=sys.stderr)
+            return 3
+        except (ClaudeOutputError, DiscoveryValidationError, EditorialValidationError) as exc:
+            print(f"ERROR: Claude scan failed: {exc}", file=sys.stderr)
+            return 1
+        if not args.dry_run_packet:
+            scan_id = save_scan(conn, result)
+            cost = result.get("usage", {}).get("cost_usd")
+            print(f"Saved Claude scan {scan_id} ({len(result.get('candidates', []))} candidates, US${cost})")
+            if result.get("_validation_repairs"):
+                print(f"WARNING: {len(result['_validation_repairs'])} citation repair(s) applied", file=sys.stderr)
 
     output_path = Path(args.output) if args.output else None
     text = json.dumps(result, ensure_ascii=False, indent=2)
@@ -115,11 +132,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     claude_p = sub.add_parser("claude-scan", help="Run the Claude-powered two-pass editorial radar scan")
     claude_p.add_argument("--output", default=None, help="Path to write the resulting JSON (default: stdout)")
-    claude_p.add_argument("--model", default=None, help="Override the model (default: MFO_TREND_MODEL env var, then claude-sonnet-5)")
+    claude_p.add_argument("--model", default=None, help="Override the model (default: MFO_TREND_MODEL env var, then claude-sonnet-5-5)")
     claude_p.add_argument("--lookback-days", type=int, default=7, help="How many days of raw signals to include (default: 7)")
     claude_p.add_argument("--max-signals", type=int, default=400, help="Cap on evidence packet size (default: 400)")
     claude_p.add_argument("--dry-run-packet", action="store_true", help="Build and report the evidence packet without calling Claude")
     claude_p.add_argument("--skip-expansion", action="store_true", help="Skip the controlled expansion step")
+    claude_p.add_argument("--no-spend-cap", action="store_true", help="Do not check/record the daily Claude spend ledger")
     claude_p.set_defaults(func=cmd_claude_scan)
 
     return parser

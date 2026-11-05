@@ -24,11 +24,17 @@ def build_editorial_user_content(
     discovery: DiscoveryOutput,
     evidence_by_id: dict[str, EvidenceRecord],
     expansion_results: dict[str, list[EvidenceRecord]],
+    refs: dict[str, str] | None = None,
 ) -> str:
+    def as_prompt(record: EvidenceRecord) -> dict:
+        if refs:
+            return record.to_prompt_dict(ref=refs[record.signal_id], include_url=False)
+        return record.to_prompt_dict()
+
     waves_payload = []
     for wave in discovery.waves:
-        original = [evidence_by_id[sid].to_prompt_dict() for sid in wave.signal_ids if sid in evidence_by_id]
-        expanded = [r.to_prompt_dict() for r in expansion_results.get(wave.wave_id, [])]
+        original = [as_prompt(evidence_by_id[sid]) for sid in wave.signal_ids if sid in evidence_by_id]
+        expanded = [as_prompt(r) for r in expansion_results.get(wave.wave_id, [])]
         waves_payload.append(
             {
                 "wave_id": wave.wave_id,
@@ -42,8 +48,30 @@ def build_editorial_user_content(
         "Here are the candidate story waves from the discovery pass, each with its original evidence "
         "plus any additional evidence found by approved follow-up searches. Return your editorial "
         "judgement per the instructions.\n\n"
-        + json.dumps({"waves": waves_payload}, ensure_ascii=False, indent=2)
+        + json.dumps({"waves": waves_payload}, ensure_ascii=False, indent=None if refs else 2)
     )
+
+
+def repair_final_output(output: ClaudeScanOutput, known_signal_ids: set[str]) -> list[str]:
+    """Visible, logged repair: drops evidence items citing ids that were not
+    supplied, drops candidates left with no evidence, and renumbers ranks
+    1..n in their original order. The candidate-count check in
+    validate_final_output still applies afterwards."""
+    notes: list[str] = []
+    kept = []
+    for candidate in sorted(output.candidates, key=lambda c: c.rank):
+        unknown = [item.signal_id for item in candidate.evidence if item.signal_id not in known_signal_ids]
+        if unknown:
+            candidate.evidence = [item for item in candidate.evidence if item.signal_id in known_signal_ids]
+            notes.append(f"editorial {candidate.headline[:60]!r}: dropped unknown signal_id(s) {unknown}")
+        if not candidate.evidence:
+            notes.append(f"editorial {candidate.headline[:60]!r}: dropped candidate with no valid evidence")
+            continue
+        kept.append(candidate)
+    for index, candidate in enumerate(kept, start=1):
+        candidate.rank = index
+    output.candidates = kept
+    return notes
 
 
 def validate_final_output(
@@ -81,11 +109,19 @@ def validate_final_output(
                 raise EditorialValidationError(
                     f"candidate rank {candidate.rank} cites signal_id {item.signal_id!r} with no matching stored record"
                 )
+            # Only signal_id is required from the model; everything else is
+            # filled from the stored record. A value the model *did* supply
+            # that disagrees with the record is still rejected below.
             if item.url is None:
-                # url is optional in the schema; signal_id is the authoritative
-                # citation, so fill the real stored url rather than reject. A
-                # non-None url that disagrees is still rejected below.
                 item.url = stored.url
+            if item.source is None:
+                item.source = stored.source
+            if item.lane is None:
+                item.lane = stored.lane
+            if item.title is None:
+                item.title = stored.title
+            if item.published_at is None:
+                item.published_at = stored.published_at
             if item.url != stored.url:
                 raise EditorialValidationError(
                     f"candidate rank {candidate.rank} cites url {item.url!r} for signal_id {item.signal_id!r}, "

@@ -13,3 +13,6 @@ scanner/trend_radar.db-wal
 
 # secrets
 .env
+scanner/logs/
+scanner/.cycle.lock
+scanner/claude_spend.json

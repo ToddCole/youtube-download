@@ -44,13 +44,14 @@ EvidenceStrength = Literal["weak", "moderate", "strong"]
 
 
 class EvidenceItem(BaseModel):
-    signal_id: str = Field(description="Must be a signal_id you were actually given -- never invented.")
-    title: str
-    source: str
-    lane: str
+    signal_id: str = Field(description="The signal_id exactly as given to you (e.g. 'S012') -- never invented.")
+    relevance: str = Field(description="One sentence on why this specific piece of evidence supports the candidate.")
+    # Filled from the stored record after the response -- leave these out.
+    title: str | None = None
+    source: str | None = None
+    lane: str | None = None
     published_at: str | None = None
     url: str | None = None
-    relevance: str = Field(description="One sentence on why this specific piece of evidence supports the candidate.")
 
 
 class Candidate(BaseModel):

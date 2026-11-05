@@ -29,9 +29,13 @@ class EvidenceRecord:
     url: str | None
     discovery_method: str
 
-    def to_prompt_dict(self) -> dict:
-        return {
-            "signal_id": self.signal_id,
+    def to_prompt_dict(self, ref: str | None = None, include_url: bool = True) -> dict:
+        """With `ref`, the record is cited by a short per-run alias (e.g.
+        "S012") instead of its UUID, and the url can be left out: the
+        model never needs to copy long strings, which is where citation
+        errors came from in the first live runs."""
+        d = {
+            "signal_id": ref or self.signal_id,
             "lane": self.lane,
             "platform": self.platform,
             "source": self.source,
@@ -42,6 +46,11 @@ class EvidenceRecord:
             "url": self.url,
             "discovery_method": self.discovery_method,
         }
+        if not include_url:
+            d.pop("url")
+        if ref:
+            d.pop("timestamp_precision")
+        return d
 
 
 def _excerpt(body_text: str | None) -> str:

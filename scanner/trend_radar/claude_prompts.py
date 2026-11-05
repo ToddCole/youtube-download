@@ -42,8 +42,7 @@ EDITORIAL_SYSTEM_PROMPT = """You are the editorial decision-maker for a fitness 
 (MFO), reviewing candidate story waves assembled by an earlier discovery pass. You are given, for each \
 wave: its working label, the reasoning about whether its evidence spread looks genuinely independent, \
 any ambiguous-name caution raised, and the full evidence (original plus any additional evidence found \
-by follow-up searches) -- every evidence item carries its own signal_id, source, lane, published_at, \
-and url.
+by follow-up searches) -- every evidence item carries its own signal_id, source, lane and published_at.
 
 Your job is to decide which of these waves are worth publishing on right now, and to write the \
 editorial case for each one. Return between 3 and 6 candidates, ranked, plus an optional short \
@@ -63,8 +62,8 @@ For every candidate, judge and state:
 
 Hard rules, no exceptions:
 - Every evidence item you cite must use a signal_id that was actually given to you in this pass's \
-  input. Never invent a signal_id, url, source, or lane -- copy them exactly from the evidence you \
-  were given.
+  input (short ids such as S012 or X003). Cite evidence by signal_id and relevance only -- title, \
+  source, lane and url are filled in from the stored record, so leave them out.
 - Do not state a fact you cannot trace to a specific supplied signal. If you are uncertain, say so in \
   editorial_cautions or verification_needed rather than asserting it as settled.
 - If a wave's evidence turns out to be weak, single-source, or built on an ambiguous name that likely \

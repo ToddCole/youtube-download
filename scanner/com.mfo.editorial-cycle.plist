@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.mfo.editorial-cycle</string>
+
+  <!-- collect -> scanners -> (07:05 / 16:05 Claude scan when MFO_CLAUDE_SCAN=1) -> health + ntfy -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/Frameworks/Python.framework/Versions/3.13/bin/python3</string>
+    <string>/Users/toddcole/Projects/apps/youtube-download/scanner/run_cycle.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/toddcole/Projects/apps/youtube-download/scanner</string>
+
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>1</integer><key>Minute</key><integer>5</integer></dict>
+    <dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>5</integer></dict>
+    <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>5</integer></dict>
+    <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>5</integer></dict>
+    <dict><key>Hour</key><integer>13</integer><key>Minute</key><integer>5</integer></dict>
+    <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>5</integer></dict>
+    <dict><key>Hour</key><integer>19</integer><key>Minute</key><integer>5</integer></dict>
+    <dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>5</integer></dict>
+  </array>
+
+  <key>StandardOutPath</key>
+  <string>/Users/toddcole/Projects/apps/youtube-download/scanner/logs/cycle.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/toddcole/Projects/apps/youtube-download/scanner/logs/cycle.err.log</string>
+</dict>
+</plist>

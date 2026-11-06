@@ -33,6 +33,7 @@ class DigestTests(unittest.TestCase):
         self.assertIn("Spanish squats", first)
         self.assertIn("1. Spanish squats · 14.5k/mo KD0", d["body"])
         self.assertEqual(d["ranks"], [2, 4, 1])
+        self.assertEqual(d["headlines"][0], "Spanish squats")
         self.assertIn("+1 more on the Desk", d["body"])
         self.assertEqual(d["priority"], "high")
 

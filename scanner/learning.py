@@ -67,6 +67,21 @@ def vote_body(vote: str, scan_id: int, rank: int) -> str:
     return f"{vote} {scan_id} {rank}"
 
 
+def vote_tag(vote: str, scan_id: int, rank: int) -> str:
+    return f"vote-{vote}-{scan_id}-{rank}"
+
+
+def parse_vote_tags(tags: list[str] | None) -> tuple[str, int, int] | None:
+    for tag in tags or []:
+        parts = tag.split("-")
+        if len(parts) == 4 and parts[0] == "vote" and parts[1] in VOTES:
+            try:
+                return parts[1], int(parts[2]), int(parts[3])
+            except ValueError:
+                return None
+    return None
+
+
 def parse_vote(body: str) -> tuple[str, int, int] | None:
     parts = (body or "").split()
     if len(parts) != 3 or parts[0] not in VOTES:
@@ -92,26 +107,28 @@ def record_vote(conn, vote: str, scan_id: int, rank: int, source: str, msg_id: s
 
 
 def poll_feedback(conn) -> int:
-    topic = feedback_topic()
-    if not topic:
-        return 0
+    """Votes arrive as tagged "✅ Saved" messages in the main topic (current
+    buttons) or as "up S R" bodies in the -fb topic (first digests)."""
     import ssl
 
     import certifi
 
-    request = Request(f"{ntfy_server()}/{topic}/json?poll=1&since=24h", headers={"User-Agent": "mfo-editorial-desk/1.0"})
     context = ssl.create_default_context(cafile=certifi.where())
-    with urlopen(request, timeout=30, context=context) as response:
-        lines = response.read().decode("utf-8", errors="replace").splitlines()
     added = 0
-    for line in lines:
-        try:
-            message = json.loads(line)
-        except ValueError:
-            continue
-        parsed = parse_vote(message.get("message", ""))
-        if message.get("event") == "message" and parsed:
-            added += record_vote(conn, *parsed, source="phone", msg_id=message.get("id"))
+    for topic in filter(None, {os.environ.get("NTFY_TOPIC"), feedback_topic()}):
+        request = Request(f"{ntfy_server()}/{topic}/json?poll=1&since=24h", headers={"User-Agent": "mfo-editorial-desk/1.0"})
+        with urlopen(request, timeout=30, context=context) as response:
+            lines = response.read().decode("utf-8", errors="replace").splitlines()
+        for line in lines:
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue
+            if message.get("event") != "message":
+                continue
+            parsed = parse_vote_tags(message.get("tags")) or parse_vote(message.get("message", ""))
+            if parsed:
+                added += record_vote(conn, *parsed, source="phone", msg_id=message.get("id"))
     return added
 
 

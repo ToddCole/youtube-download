@@ -29,6 +29,8 @@ class VoteTests(unittest.TestCase):
         self.assertIsNone(learning.parse_vote("hello"))
         self.assertIsNone(learning.parse_vote("up x 2"))
         self.assertEqual(learning.vote_body("down", 7, 2), "down 7 2")
+        self.assertEqual(learning.parse_vote_tags(["white_check_mark", learning.vote_tag("up", 7, 2)]), ("up", 7, 2))
+        self.assertIsNone(learning.parse_vote_tags(["newspaper"]))
 
     def test_latest_vote_wins_and_duplicates_ignored(self):
         conn = sqlite3.connect(":memory:")

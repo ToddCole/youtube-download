@@ -66,12 +66,13 @@ def build_digest(scan: dict, scores: dict[int, dict], emerging: dict | None, now
     picks.sort(key=key)
 
     lines = []
-    ranks = []
+    ranks, names = [], []
     for n, c in enumerate(picks[:TOP_N], 1):
         seo = scores.get(c.get("rank"))
         mark = VERDICT_MARK.get((seo or {}).get("verdict"), "•")
         lines.append(f"{mark} {n}. {_short(c.get('headline', ''))} · {_volume_line(seo)}")
         ranks.append(c.get("rank"))
+        names.append(_short(c.get("headline", "")))
 
     write_now = [r for r, s in scores.items() if s.get("verdict") == "write_now"]
     strong = [
@@ -94,22 +95,32 @@ def build_digest(scan: dict, scores: dict[int, dict], emerging: dict | None, now
         "priority": "high" if strong else "default",
         # Digest position n -> Claude rank, for the 👍 buttons.
         "ranks": ranks,
+        "headlines": names,
     }
 
 
-def vote_actions(scan_id: int, ranks: list[int]) -> list[dict]:
-    """ntfy allows 3 buttons: one 👍 per pick. Each POSTs to the private
-    feedback topic, which learning.py polls every cycle."""
-    from learning import feedback_topic, ntfy_server, vote_body
+def vote_actions(scan_id: int, ranks: list[int], headlines: list[str] | None = None) -> list[dict]:
+    """ntfy allows 3 buttons: one 👍 per pick. A tap posts a visible
+    "✅ Saved" confirmation into the main topic (so Todd sees it worked);
+    the vote rides in its tag, which learning.py polls every cycle."""
+    import os
 
-    topic = feedback_topic()
+    from learning import ntfy_server, vote_tag
+
+    topic = os.environ.get("NTFY_TOPIC")
     if not topic or scan_id is None:
         return []
-    return [
-        {"action": "http", "label": f"👍 {n}", "url": f"{ntfy_server()}/{topic}", "method": "POST",
-         "body": vote_body("up", scan_id, rank), "clear": False}
-        for n, rank in enumerate(ranks[:3], 1)
-    ]
+    headlines = headlines or []
+    actions = []
+    for n, rank in enumerate(ranks[:3], 1):
+        name = headlines[n - 1] if n - 1 < len(headlines) else f"pick {n}"
+        actions.append({
+            "action": "http", "label": f"👍 {n}", "url": f"{ntfy_server()}/{topic}", "method": "POST",
+            "headers": {"Title": f"Saved: more like #{n}", "Tags": f"white_check_mark,{vote_tag('up', scan_id, rank)}",
+                        "Priority": "2"},
+            "body": f"👍 {name}", "clear": False,
+        })
+    return actions
 
 
 def publish(digest: dict) -> bool:
@@ -128,7 +139,7 @@ def publish(digest: dict) -> bool:
     payload = {
         "topic": topic, "title": digest["title"], "message": digest["body"],
         "priority": {"high": 4, "default": 3}.get(digest["priority"], 3), "tags": ["newspaper"],
-        "actions": vote_actions(digest.get("scan_id"), digest.get("ranks") or []),
+        "actions": vote_actions(digest.get("scan_id"), digest.get("ranks") or [], digest.get("headlines")),
     }
     request = Request(ntfy_server(), data=json.dumps(payload).encode("utf-8"), method="POST",
                       headers={"Content-Type": "application/json", "User-Agent": "mfo-editorial-desk/1.0"})

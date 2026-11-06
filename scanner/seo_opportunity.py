@@ -78,6 +78,8 @@ class OpenSEOClient:
             "Accept": "application/json, text/event-stream",
             "Authorization": f"Bearer {self.api_key}",
             "MCP-Protocol-Version": "2025-06-18",
+            # Cloudflare blocks urllib's default UA (error 1010).
+            "User-Agent": "mfo-editorial-desk/1.0",
         }
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
@@ -280,6 +282,30 @@ def gsc_matches(queries: list[str], rows: list[dict]) -> list[dict]:
     return matches
 
 
+def keyword_pages(queries: list[str], pages: list[dict]) -> list[dict]:
+    """MFO archive pages whose title/slug contain every content word of one of
+    the queries: strict on purpose, so 'Update existing' means a real page."""
+    out = []
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        page_words = _content_words(normalise_query(f"{page.get('title', '')} {page.get('slug', '')}".replace("-", " ")))
+        for query in queries:
+            words = _content_words(query)
+            if len(words) >= 2 and words <= page_words:
+                out.append({"title": page.get("title") or page.get("slug"), "url": page.get("url"), "query": query})
+                break
+    return out
+
+
+def load_mfo_pages() -> list[dict]:
+    from editorial_today import MFO_INDEX
+    try:
+        return json.loads(MFO_INDEX.read_text(encoding="utf-8")).get("pages") or []
+    except (OSError, ValueError):
+        return []
+
+
 # --- Verdicts ------------------------------------------------------------
 
 @dataclass
@@ -302,7 +328,7 @@ def decide(demand: dict, footing: list[dict], related_pages: list[dict]) -> Verd
         )
     if related_pages and volume > 0:
         return Verdict("update_existing", "Update existing page",
-                       f"{volume:,}/mo search demand and MFO has a related page: {related_pages[0].get('title')}")
+                       f"{volume:,}/mo search demand and MFO already has a page on '{related_pages[0].get('query')}': {related_pages[0].get('title')}")
     if volume >= WRITE_NOW_MIN_VOLUME and (kd is None or kd <= WRITE_NOW_MAX_KD):
         kd_txt = f"KD {kd}" if kd is not None else "KD n/a"
         return Verdict("write_now", "Write now",
@@ -341,7 +367,6 @@ def demand_for(conn, queries: list[str]) -> dict:
 
 
 def score_latest_scan(client: OpenSEOClient, ledger: CreditLedger, db_path: Path = TREND_DB) -> dict:
-    from editorial_today import related_mfo_pages
     from trend_radar.scan_store import latest_scan
 
     conn = sqlite3.connect(db_path)
@@ -369,17 +394,19 @@ def score_latest_scan(client: OpenSEOClient, ledger: CreditLedger, db_path: Path
                 errors.append(str(exc))
                 break
     rows = gsc_rows(client, dateRange="last_28_days", dimensions=["query", "page"], rowLimit=1000)
+    mfo_pages = load_mfo_pages()
 
     scored = 0
     for candidate, queries in picks:
         demand = demand_for(conn, queries)
         footing = gsc_matches(queries, rows)[:5]
-        related = related_mfo_pages(f"{candidate.get('headline', '')} {candidate.get('topic_summary', '')}")
-        verdict = decide(demand, footing, related) if queries else Verdict(
+        demand_queries = [k["keyword"] for k in demand["keywords"] if k["volume"] > 0]
+        pages = keyword_pages(demand_queries, mfo_pages)
+        verdict = decide(demand, footing, pages) if queries else Verdict(
             "watch", "Watch", "No search queries proposed for this pick (scan predates SEO scoring)")
         score = {
             "verdict": verdict.code, "label": verdict.label, "reason": verdict.reason,
-            "queries": queries, "demand": demand, "gsc": footing,
+            "queries": queries, "demand": demand, "gsc": footing, "pages": pages,
         }
         conn.execute(
             "INSERT OR REPLACE INTO seo_scores (scan_id, rank, scored_at, score_json) VALUES (?,?,?,?)",

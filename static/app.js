@@ -788,7 +788,7 @@ function renderEmerging(emerging) {
   const rows = emerging?.rows || [];
   panel.classList.toggle("hidden", !emerging);
   document.getElementById("emerging-summary").textContent =
-    `Demand we're not serving (${rows.length})${emerging ? ` · ${shortDate(emerging.computed_at)}` : ""}`;
+    `New in Google this week (${rows.length})${emerging ? ` · ${shortDate(emerging.computed_at)}` : ""}`;
   document.getElementById("emerging-list").innerHTML = rows.length
     ? `<ul class="evidence-list">${rows.map((r) =>
         `<li><strong>${escapeHtml(r.query)}</strong>: ${fmtNum(r.impressions_7d)} impr in 7 days (was ${fmtNum(r.impressions_prior_28d)}), pos ${r.position != null ? Number(r.position).toFixed(1) : "–"} · showing <a href="${escapeAttr(r.page || "#")}" target="_blank" rel="noopener">${escapeHtml((r.page || "").replace("https://mensfitnessonline.com.au", "") || "page")}</a></li>`

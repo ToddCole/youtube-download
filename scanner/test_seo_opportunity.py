@@ -26,7 +26,7 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(seo.decide(demand(14800, 4), footing, []).code, "update_existing")
 
     def test_related_archive_page_with_demand_means_update(self):
-        v = seo.decide(demand(90, 0), [], [{"title": "HYROX Training", "url": "u"}])
+        v = seo.decide(demand(90, 0), [], [{"title": "HYROX Training", "url": "u", "query": "hyrox training"}])
         self.assertEqual(v.code, "update_existing")
 
     def test_no_demand_is_watch(self):
@@ -52,6 +52,18 @@ class GscMatchTests(unittest.TestCase):
 
     def test_single_generic_word_row_does_not_match(self):
         self.assertEqual(seo.gsc_matches(["nyc marathon winner"], self.ROWS), [])
+
+
+class KeywordPageTests(unittest.TestCase):
+    PAGES = [
+        {"title": "Lifting Linked to Longevity", "url": "u1"},
+        {"title": "How to do a Bulgarian Split Squat", "url": "u2"},
+        {"title": "Spanish Squat: Benefits and Form", "url": "u3", "slug": "spanish-squat"},
+    ]
+
+    def test_page_needs_every_word_of_the_query(self):
+        self.assertEqual([p["url"] for p in seo.keyword_pages(["spanish squat"], self.PAGES)], ["u3"])
+        self.assertEqual(seo.keyword_pages(["build muscle after 50"], self.PAGES), [])
 
 
 class CacheAndLedgerTests(unittest.TestCase):

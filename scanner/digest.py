@@ -118,7 +118,7 @@ def vote_actions(scan_id: int, ranks: list[int], headlines: list[str] | None = N
             "action": "http", "label": f"👍 {n}", "url": f"{ntfy_server()}/{topic}", "method": "POST",
             "headers": {"Title": f"Saved: more like #{n}", "Tags": f"white_check_mark,{vote_tag('up', scan_id, rank)}",
                         "Priority": "2"},
-            "body": f"👍 {name}", "clear": False,
+            "body": f"👍 {name}", "clear": True,
         })
     return actions
 

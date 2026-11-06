@@ -1746,8 +1746,18 @@ def get_latest_agent_review():
 
 @app.get("/api/editorial/today")
 def get_today_board():
+    from seo_opportunity import load_emerging, load_scores
+
     meta, leads = trend_leads()
-    return {"trend_scan": meta, "trend_leads": leads, "decisions": get_decisions()}
+    scores = load_scores(meta["scan_id"]) if meta else {}
+    for lead in leads:
+        lead["seo"] = scores.get(lead.get("rank"))
+    return {
+        "trend_scan": meta,
+        "trend_leads": leads,
+        "emerging_demand": load_emerging(),
+        "decisions": get_decisions(),
+    }
 
 
 @app.post("/api/editorial/decisions")

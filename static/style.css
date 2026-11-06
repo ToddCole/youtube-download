@@ -756,3 +756,9 @@ header {
 .evidence-list { margin: 6px 0 0 18px; padding: 0; font-size: 0.9em; }
 .evidence-list li { margin: 3px 0; }
 #pipeline-status { max-width: 50%; text-align: right; }
+
+.seo-pill { padding: 2px 8px; border-radius: 999px; font-weight: 600; font-size: 0.85em; }
+.seo-write_now { background: #1f9d55; color: #fff; }
+.seo-update_existing { background: #2b6cb0; color: #fff; }
+.seo-watch { background: #b7791f; color: #fff; }
+.seo-skip { background: #718096; color: #fff; }

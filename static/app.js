@@ -727,11 +727,13 @@ function renderToday() {
       `<a href="${escapeAttr(page.url)}" target="_blank" rel="noopener">${escapeHtml(page.title)}</a>`
     ).join(" · ");
     const checks = [...(lead.verification_needed || []), ...(lead.editorial_cautions || [])];
+    const seoHtml = renderSeo(lead.seo);
     const card = document.createElement("article");
     card.className = "recommendation-card";
     card.innerHTML = `
       <div class="lead-meta-row">
         <span class="source-pill">#${escapeHtml(String(lead.rank || ""))}</span>
+        ${lead.seo ? `<span class="seo-pill seo-${escapeAttr(lead.seo.verdict)}">${escapeHtml(lead.seo.label)}</span>` : ""}
         <span class="rating-pill rating-${confidenceRating(lead.confidence)}">${escapeHtml(lead.confidence || "")} confidence</span>
         <span>${escapeHtml(lead.evidence_strength || "")} evidence · ${escapeHtml(String(lead.independent_sources ?? ""))} sources · ${escapeHtml((lead.lanes || []).join(", "))}</span>
         ${decision ? `<span class="decision-pill decision-${escapeAttr(decision)}">${decisionLabel(decision)}</span>` : ""}
@@ -744,18 +746,54 @@ function renderToday() {
         <div><dt>MFO angle</dt><dd>${escapeHtml(lead.likely_mfo_angle || "")}</dd></div>
         <div><dt>Check first</dt><dd>${checks.length ? escapeHtml(checks.join(" · ")) : "Nothing flagged"}</dd></div>
         <div><dt>Already on MFO?</dt><dd>${related || "No close match in the archive"}</dd></div>
+        ${seoHtml}
       </dl>
       <details><summary>Evidence (${(lead.evidence || []).length})</summary><ul class="evidence-list">${evidence}</ul></details>
       <div class="lead-actions">${decisionButtons(lead.lead_id, decision, saving)}</div>
     `;
     list.appendChild(card);
   });
+  renderEmerging(todayBoard?.emerging_demand);
   const watch = meta?.watchlist || [];
   const watchEl = document.getElementById("today-watchlist");
   if (watchEl) {
     watchEl.classList.toggle("hidden", !watch.length);
     document.getElementById("today-watchlist-items").innerHTML = watch.map((w) => `<li>${escapeHtml(w)}</li>`).join("");
   }
+}
+
+function fmtNum(value) {
+  return typeof value === "number" ? value.toLocaleString() : "–";
+}
+
+function renderSeo(seo) {
+  if (!seo) return `<div><dt>Search</dt><dd class="small-muted">Not scored yet (runs after each Claude scan once the OpenSEO key is set).</dd></div>`;
+  const d = seo.demand || {};
+  const kws = (d.keywords || []).slice(0, 5).map((k) =>
+    `<li>${escapeHtml(k.keyword)}: AU ${fmtNum(k.AU_volume)} · US ${fmtNum(k.US_volume)} · KD ${k.AU_kd ?? k.US_kd ?? "–"}</li>`
+  ).join("");
+  const gsc = (seo.gsc || []).slice(0, 3).map((g) =>
+    `<li>"${escapeHtml(g.query)}": ${fmtNum(g.impressions)} impr, pos ${g.position != null ? Number(g.position).toFixed(1) : "–"} → <a href="${escapeAttr(g.page || "#")}" target="_blank" rel="noopener">${escapeHtml((g.page || "").replace("https://mensfitnessonline.com.au", ""))}</a></li>`
+  ).join("");
+  return `
+    <div><dt>Search verdict</dt><dd><strong>${escapeHtml(seo.label)}</strong>: ${escapeHtml(seo.reason)}</dd></div>
+    <div><dt>Search demand</dt><dd>${kws ? `<ul class="evidence-list">${kws}</ul>` : "No queries"}</dd></div>
+    ${gsc ? `<div><dt>MFO in Google now</dt><dd><ul class="evidence-list">${gsc}</ul></dd></div>` : ""}
+  `;
+}
+
+function renderEmerging(emerging) {
+  const panel = document.getElementById("emerging-panel");
+  if (!panel) return;
+  const rows = emerging?.rows || [];
+  panel.classList.toggle("hidden", !emerging);
+  document.getElementById("emerging-summary").textContent =
+    `Demand we're not serving (${rows.length})${emerging ? ` · ${shortDate(emerging.computed_at)}` : ""}`;
+  document.getElementById("emerging-list").innerHTML = rows.length
+    ? `<ul class="evidence-list">${rows.map((r) =>
+        `<li><strong>${escapeHtml(r.query)}</strong>: ${fmtNum(r.impressions_7d)} impr in 7 days (was ${fmtNum(r.impressions_prior_28d)}), pos ${r.position != null ? Number(r.position).toFixed(1) : "–"} · showing <a href="${escapeAttr(r.page || "#")}" target="_blank" rel="noopener">${escapeHtml((r.page || "").replace("https://mensfitnessonline.com.au", "") || "page")}</a></li>`
+      ).join("")}</ul>`
+    : `<p class="small-muted">Nothing new this week.</p>`;
 }
 
 // --- Agent Review via Claude API ------------------------------------------

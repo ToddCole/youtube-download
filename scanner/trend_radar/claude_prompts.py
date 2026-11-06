@@ -59,6 +59,8 @@ For every candidate, judge and state:
 - The concrete, publishable MFO angle -- not just "write about X," but what MFO's specific take would be.
 - Any weaknesses, unverified claims, or facts that would need checking before publication.
 - Your confidence, and a separate assessment of how strong the supporting evidence itself is.
+- 2-5 short Google searches a reader would actually type to find this story or MFO's angle on it \
+  (e.g. a person's name, the event, the practical question). These are used to check search demand.
 
 Hard rules, no exceptions:
 - Every evidence item you cite must use a signal_id that was actually given to you in this pass's \

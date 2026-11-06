@@ -183,6 +183,8 @@ def run_cycle(with_claude: bool | None, alert: bool) -> int:
                 if CLAUDE_OUTPUT.exists() and CLAUDE_OUTPUT.stat().st_mtime >= started:
                     cost = claude_cost(CLAUDE_OUTPUT)
                 steps.append(step)
+                if step["status"] == "ok" and os.environ.get("OPENSEO_API_KEY"):
+                    steps.append(run_step("seo_score", [py, "seo_opportunity.py"], 600))
     except LockBusy as exc:
         steps.append({"step": "lock", "status": "skipped", "stderr_tail": str(exc)})
 

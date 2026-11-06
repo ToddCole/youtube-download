@@ -67,6 +67,10 @@ class Candidate(BaseModel):
     evidence: list[EvidenceItem]
     verification_needed: list[str] = Field(default_factory=list)
     editorial_cautions: list[str] = Field(default_factory=list)
+    search_queries: list[str] = Field(
+        default_factory=list,
+        description="2-5 short Google searches a reader would type to find this story or its MFO angle (lowercase, no quotes).",
+    )
 
 
 class ClaudeScanOutput(BaseModel):

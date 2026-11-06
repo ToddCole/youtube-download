@@ -16,3 +16,4 @@ scanner/trend_radar.db-wal
 scanner/logs/
 scanner/.cycle.lock
 scanner/claude_spend.json
+scanner/openseo_credits.json

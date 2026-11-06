@@ -185,6 +185,8 @@ def run_cycle(with_claude: bool | None, alert: bool) -> int:
                 steps.append(step)
                 if step["status"] == "ok" and os.environ.get("OPENSEO_API_KEY"):
                     steps.append(run_step("seo_score", [py, "seo_opportunity.py"], 600))
+                if step["status"] == "ok" and alert and os.environ.get("NTFY_TOPIC"):
+                    steps.append(run_step("digest", [py, "digest.py"], 60))
     except LockBusy as exc:
         steps.append({"step": "lock", "status": "skipped", "stderr_tail": str(exc)})
 

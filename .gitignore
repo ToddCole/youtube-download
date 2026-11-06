@@ -17,3 +17,4 @@ scanner/logs/
 scanner/.cycle.lock
 scanner/claude_spend.json
 scanner/openseo_credits.json
+scanner/digest_state.json

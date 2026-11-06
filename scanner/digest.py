@@ -26,6 +26,16 @@ STRONG_WRITE_NOW_VOLUME = 1000
 VERDICT_MARK = {"write_now": "🟢", "update_existing": "🔵", "watch": "🟠", "skip": "⚪"}
 
 
+def _short(headline: str, limit: int = 48) -> str:
+    """Lock-screen banners show ~4 lines: keep each pick to one."""
+    text = (headline or "").split(":")[0].strip()
+    return text if len(text) <= limit else text[: limit - 1].rsplit(" ", 1)[0] + "…"
+
+
+def _k(n: int) -> str:
+    return f"{n / 1000:.1f}k".replace(".0k", "k") if n >= 1000 else str(n)
+
+
 def _volume_line(seo: dict | None) -> str:
     if not seo:
         return "not SEO-scored"
@@ -35,11 +45,11 @@ def _volume_line(seo: dict | None) -> str:
     kd = demand.get("best_kd")
     if seo.get("verdict") == "update_existing" and seo.get("gsc"):
         g = seo["gsc"][0]
-        return f"already ranking: '{g.get('query')}' {g.get('impressions')} impr"
+        return f"ranking for '{g.get('query')}'"
     if not kw or not vol:
-        return "no search demand yet"
-    kd_txt = f", KD {kd}" if kd is not None else ""
-    return f"'{kw}' {vol:,}/mo{kd_txt}"
+        return "no demand yet"
+    kd_txt = f" KD{kd}" if kd is not None else ""
+    return f"{_k(vol)}/mo{kd_txt}"
 
 
 def build_digest(scan: dict, scores: dict[int, dict], emerging: dict | None, now: datetime | None = None) -> dict:
@@ -59,8 +69,7 @@ def build_digest(scan: dict, scores: dict[int, dict], emerging: dict | None, now
     for c in picks[:TOP_N]:
         seo = scores.get(c.get("rank"))
         mark = VERDICT_MARK.get((seo or {}).get("verdict"), "•")
-        label = (seo or {}).get("label", "")
-        lines.append(f"{mark} {c.get('headline', '').strip()}\n   {label}: {_volume_line(seo)}".rstrip())
+        lines.append(f"{mark} {_short(c.get('headline', ''))} · {_volume_line(seo)}")
 
     write_now = [r for r, s in scores.items() if s.get("verdict") == "write_now"]
     strong = [
@@ -70,8 +79,7 @@ def build_digest(scan: dict, scores: dict[int, dict], emerging: dict | None, now
     rows = (emerging or {}).get("rows") or []
     if rows:
         top = rows[0]
-        page = (top.get("page") or "").replace("https://mensfitnessonline.com.au", "")
-        lines.append(f"📈 New in Google: '{top.get('query')}' {top.get('impressions_7d')} impr → {page}")
+        lines.append(f"📈 '{top.get('query')}' {_k(top.get('impressions_7d') or 0)} impr, new")
 
     extra = len(picks) - TOP_N
     if extra > 0:

@@ -31,7 +31,7 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(d["title"], "MFO Morning picks: 2 Write now")
         first = d["body"].splitlines()[0]
         self.assertIn("Spanish squats", first)
-        self.assertIn("'spanish squat' 14,500/mo, KD 0", d["body"])
+        self.assertIn("Spanish squats · 14.5k/mo KD0", d["body"])
         self.assertIn("+1 more on the Desk", d["body"])
         self.assertEqual(d["priority"], "high")
 
@@ -41,7 +41,7 @@ class DigestTests(unittest.TestCase):
         d = digest.build_digest(SCAN, {1: score("write_now", 70)}, emerging, now=datetime(2026, 11, 7, 16, 5))
         self.assertTrue(d["title"].startswith("MFO Afternoon picks"))
         self.assertEqual(d["priority"], "default")
-        self.assertIn("New in Google: '100 physique france' 1157 impr → /100-physique-france/", d["body"])
+        self.assertIn("📈 '100 physique france' 1.2k impr, new", d["body"])
 
     def test_unscored_scan_still_digests(self):
         d = digest.build_digest(SCAN, {}, None)

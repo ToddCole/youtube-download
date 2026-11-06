@@ -77,6 +77,14 @@ def cmd_claude_scan(args: argparse.Namespace) -> int:
 
     ledger = None if (args.no_spend_cap or args.dry_run_packet) else SpendLedger()
     with db_module.connect(args.db) as conn:
+        editor_feedback = None
+        if not (args.no_feedback or args.dry_run_packet):
+            try:
+                from learning import build_feedback
+
+                editor_feedback = build_feedback(conn)
+            except Exception as exc:  # noqa: BLE001 — learning is a bonus, never a blocker
+                print(f"warning: no editor feedback this scan: {exc}", file=sys.stderr)
         try:
             result = run_claude_scan(
                 conn,
@@ -86,6 +94,7 @@ def cmd_claude_scan(args: argparse.Namespace) -> int:
                 skip_expansion=args.skip_expansion,
                 dry_run_packet=args.dry_run_packet,
                 ledger=ledger,
+                editor_feedback=editor_feedback,
             )
         except MissingApiKeyError as exc:
             print(f"error: {exc}", file=sys.stderr)
@@ -138,6 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     claude_p.add_argument("--dry-run-packet", action="store_true", help="Build and report the evidence packet without calling Claude")
     claude_p.add_argument("--skip-expansion", action="store_true", help="Skip the controlled expansion step")
     claude_p.add_argument("--no-spend-cap", action="store_true", help="Do not check/record the daily Claude spend ledger")
+    claude_p.add_argument("--no-feedback", action="store_true", help="Do not show Claude the editor feedback (published posts, 👍/👎)")
     claude_p.set_defaults(func=cmd_claude_scan)
 
     return parser

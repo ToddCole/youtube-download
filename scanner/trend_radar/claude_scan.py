@@ -69,7 +69,11 @@ def run_claude_scan(
     skip_expansion: bool = False,
     dry_run_packet: bool = False,
     ledger: SpendLedger | None = None,
+    editor_feedback: str | None = None,
 ) -> dict:
+    """editor_feedback: learning.build_feedback() text, appended to both
+    passes so discovery and editorial lean toward what the editor uses."""
+    feedback_suffix = f"\n\n{editor_feedback}" if editor_feedback else ""
     evidence = build_evidence_packet(conn, lookback_days=lookback_days, max_signals=max_signals + 1)
     truncated = len(evidence) > max_signals
     evidence = evidence[:max_signals]
@@ -96,7 +100,7 @@ def run_claude_scan(
         client,
         model=resolved_model,
         system=DISCOVERY_SYSTEM_PROMPT,
-        user_content=build_discovery_user_content(evidence, refs),
+        user_content=build_discovery_user_content(evidence, refs) + feedback_suffix,
         output_format=DiscoveryOutput,
         max_tokens=DISCOVERY_MAX_TOKENS,
         usage=usage,
@@ -121,7 +125,7 @@ def run_claude_scan(
     shown_ids = {sid for wave in discovery.waves for sid in wave.signal_ids}
     shown_ids |= {r.signal_id for records in expansion_results.values() for r in records}
 
-    user_content = build_editorial_user_content(discovery, evidence_by_id, expansion_results, refs)
+    user_content = build_editorial_user_content(discovery, evidence_by_id, expansion_results, refs) + feedback_suffix
     editorial: ClaudeScanOutput | None = None
     last_error: Exception | None = None
     for attempt in (1, 2):
@@ -166,6 +170,7 @@ def run_claude_scan(
     result["_expansion_queries_executed"] = expansion_log
     result["_evidence_packet_size"] = len(evidence)
     result["_evidence_packet_truncated"] = truncated
+    result["_editor_feedback_used"] = bool(editor_feedback)
     result["_discovery_waves"] = [
         {
             "wave_id": w.wave_id,

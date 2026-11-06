@@ -443,6 +443,22 @@ class EndToEndMockedScanTests(ClaudeTestCase):
             for marker in ("S999", "wave-2", "S555", "S404"):
                 self.assertIn(marker, joined)
 
+    def test_editor_feedback_reaches_both_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = self.connect(Path(tmp) / "t.db")
+            self.seed_source_and_run(conn)
+            self.add_signal(conn, url="https://example.com/one", title="Story one")
+            discovery = DiscoveryOutput(waves=[
+                DiscoveryWave(wave_id="wave-1", working_label="A", signal_ids=["S001"], cross_source_reasoning="x"),
+            ])
+            editorial = ClaudeScanOutput(corpus_summary="c", candidates=[self._cand(r, ["S001"]) for r in (1, 2, 3)])
+            client = self._client_returning(self._fake_parsed_response(discovery), self._fake_parsed_response(editorial))
+            result = self._run(conn, client, editor_feedback="EDITOR FEEDBACK — spanish squat published")
+            calls = client.messages.stream.call_args_list
+            for call in calls:
+                self.assertIn("EDITOR FEEDBACK", call.kwargs["messages"][0]["content"])
+            self.assertTrue(result["_editor_feedback_used"])
+
     def test_truncated_response_reports_stop_reason(self):
         from trend_radar.claude_client import ClaudeOutputError
 

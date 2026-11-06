@@ -1744,14 +1744,54 @@ def get_latest_agent_review():
     }
 
 
+def _pick_votes() -> dict:
+    import sqlite3 as _sqlite3
+
+    from learning import latest_votes
+    import editorial_today as _et
+
+    if not _et.TREND_DB.exists():
+        return {}
+    conn = _sqlite3.connect(_et.TREND_DB)
+    try:
+        return latest_votes(conn)
+    finally:
+        conn.close()
+
+
+class PickVoteRequest(BaseModel):
+    scan_id: int
+    rank: int
+    vote: Literal["up", "down"]
+
+
+@app.post("/api/editorial/feedback")
+def save_pick_vote(req: PickVoteRequest):
+    """👍/👎 from the Today board: same store as the phone buttons, read by
+    learning.build_feedback() before every Claude scan."""
+    import sqlite3 as _sqlite3
+
+    from learning import record_vote
+    import editorial_today as _et
+
+    conn = _sqlite3.connect(_et.TREND_DB)
+    try:
+        record_vote(conn, req.vote, req.scan_id, req.rank, source="desk")
+    finally:
+        conn.close()
+    return {"ok": True, "vote": req.vote}
+
+
 @app.get("/api/editorial/today")
 def get_today_board():
     from seo_opportunity import load_emerging, load_scores
 
     meta, leads = trend_leads()
     scores = load_scores(meta["scan_id"]) if meta else {}
+    votes = _pick_votes()
     for lead in leads:
         lead["seo"] = scores.get(lead.get("rank"))
+        lead["vote"] = votes.get((meta["scan_id"], lead.get("rank"))) if meta else None
     return {
         "trend_scan": meta,
         "trend_leads": leads,

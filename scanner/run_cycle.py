@@ -1,4 +1,4 @@
-"""One scheduled editorial cycle: collect -> scan -> (Claude review slot) -> health.
+"""One scheduled cycle: collect -> learn -> (Claude slot) scan -> SEO -> digest -> health.
 
 Run by launchd every 3h (see com.mfo.editorial-cycle.plist). Safe to run by
 hand:  python3 run_cycle.py [--claude|--no-claude] [--no-alert]
@@ -27,13 +27,9 @@ from cycle_lock import LockBusy, cycle_lock
 SCANNER_DIR = Path(__file__).resolve().parent
 SCANNER_DB = SCANNER_DIR / "scanner.db"
 REPORTS = SCANNER_DIR / "reports"
-REPORT_FILES = {
-    "creator": REPORTS / "latest.json",
-    "news": REPORTS / "news-latest.json",
-    "research": REPORTS / "research-latest.json",
-}
 CLAUDE_OUTPUT = REPORTS / "trend-claude-latest.json"
-STALE_HOURS = 12
+# Two Claude scans a day, so anything older than this means one was missed.
+STALE_HOURS = 20
 # Local hours (Mac clock) at which the paid Claude scan runs. Must line up
 # with the launchd 3-hourly grid.
 CLAUDE_HOURS = {7, 16}
@@ -95,18 +91,11 @@ def health_problems(steps: list[dict]) -> list[str]:
         if step["status"] != "ok":
             detail = (step.get("stderr_tail") or "").splitlines()[-1:] or [""]
             problems.append(f"{step['step']} {step['status']}: {detail[0][:200]}")
-    for kind, path in REPORT_FILES.items():
-        age = report_age_hours(path)
-        if age is None:
-            problems.append(f"{kind} report missing")
-        elif age > STALE_HOURS:
-            problems.append(f"{kind} report stale ({age:.0f}h old)")
-    try:
-        news = json.loads(REPORT_FILES["news"].read_text(encoding="utf-8"))
-        if int(news.get("viable_count") or 0) == 0 and int(news.get("lead_count") or 0) > 0:
-            problems.append(f"News Radar: 0 viable of {news.get('lead_count')} leads")
-    except (OSError, ValueError):
-        pass
+    age = report_age_hours(CLAUDE_OUTPUT)
+    if age is None:
+        problems.append("no Claude scan yet")
+    elif age > STALE_HOURS and os.environ.get("MFO_CLAUDE_SCAN") == "1":
+        problems.append(f"Claude scan stale ({age:.0f}h old)")
     try:
         with urlopen(DESK_URL, timeout=5) as response:
             if response.status != 200:
@@ -172,8 +161,12 @@ def run_cycle(with_claude: bool | None, alert: bool) -> int:
     try:
         with cycle_lock("scheduled cycle"):
             steps.append(run_step("trend_collect", [py, "-m", "trend_radar", "collect"], 900))
-            steps.append(run_step("scanners", [py, "scanner.py", "--no-open-reports"], 1800))
-            if claude_enabled(with_claude):
+            claude_slot = claude_enabled(with_claude)
+            # Learn: pull 👍/👎 taps every cycle (ntfy keeps them ~12h); re-read
+            # MFO's published posts before each Claude scan.
+            learn_args = [py, "learning.py", "--poll"] + (["--refresh-index"] if claude_slot else [])
+            steps.append(run_step("learn", learn_args, 600))
+            if claude_slot:
                 started = time.time()
                 step = run_step(
                     "claude_scan",

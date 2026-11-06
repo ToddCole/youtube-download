@@ -66,10 +66,12 @@ def build_digest(scan: dict, scores: dict[int, dict], emerging: dict | None, now
     picks.sort(key=key)
 
     lines = []
-    for c in picks[:TOP_N]:
+    ranks = []
+    for n, c in enumerate(picks[:TOP_N], 1):
         seo = scores.get(c.get("rank"))
         mark = VERDICT_MARK.get((seo or {}).get("verdict"), "•")
-        lines.append(f"{mark} {_short(c.get('headline', ''))} · {_volume_line(seo)}")
+        lines.append(f"{mark} {n}. {_short(c.get('headline', ''))} · {_volume_line(seo)}")
+        ranks.append(c.get("rank"))
 
     write_now = [r for r, s in scores.items() if s.get("verdict") == "write_now"]
     strong = [
@@ -90,7 +92,52 @@ def build_digest(scan: dict, scores: dict[int, dict], emerging: dict | None, now
         "title": title,
         "body": "\n".join(lines) or "No picks this scan.",
         "priority": "high" if strong else "default",
+        # Digest position n -> Claude rank, for the 👍 buttons.
+        "ranks": ranks,
     }
+
+
+def vote_actions(scan_id: int, ranks: list[int]) -> list[dict]:
+    """ntfy allows 3 buttons: one 👍 per pick. Each POSTs to the private
+    feedback topic, which learning.py polls every cycle."""
+    from learning import feedback_topic, ntfy_server, vote_body
+
+    topic = feedback_topic()
+    if not topic or scan_id is None:
+        return []
+    return [
+        {"action": "http", "label": f"👍 {n}", "url": f"{ntfy_server()}/{topic}", "method": "POST",
+         "body": vote_body("up", scan_id, rank), "clear": False}
+        for n, rank in enumerate(ranks[:3], 1)
+    ]
+
+
+def publish(digest: dict) -> bool:
+    """JSON publish (headers can't carry emoji labels)."""
+    import os
+    import ssl
+    from urllib.request import Request, urlopen
+
+    import certifi
+
+    from learning import ntfy_server
+
+    topic = os.environ.get("NTFY_TOPIC")
+    if not topic:
+        return False
+    payload = {
+        "topic": topic, "title": digest["title"], "message": digest["body"],
+        "priority": {"high": 4, "default": 3}.get(digest["priority"], 3), "tags": ["newspaper"],
+        "actions": vote_actions(digest.get("scan_id"), digest.get("ranks") or []),
+    }
+    request = Request(ntfy_server(), data=json.dumps(payload).encode("utf-8"), method="POST",
+                      headers={"Content-Type": "application/json", "User-Agent": "mfo-editorial-desk/1.0"})
+    try:
+        with urlopen(request, timeout=15, context=ssl.create_default_context(cafile=certifi.where())):
+            return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: digest push failed: {exc}", file=sys.stderr)
+        return False
 
 
 def _already_sent(scan_id) -> bool:
@@ -116,9 +163,7 @@ def send_digest(force: bool = False, dry_run: bool = False, db_path: Path = TREN
     digest = build_digest(scan, load_scores(scan["_scan_id"], db_path), load_emerging(db_path))
     if dry_run:
         return f"[{digest['priority']}] {digest['title']}\n{digest['body']}"
-    from run_cycle import send_alert
-
-    if send_alert(digest["title"], digest["body"], priority=digest["priority"]):
+    if publish(digest):
         _mark_sent(digest["scan_id"])
         return "sent"
     return "not sent"

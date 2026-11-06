@@ -31,7 +31,8 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(d["title"], "MFO Morning picks: 2 Write now")
         first = d["body"].splitlines()[0]
         self.assertIn("Spanish squats", first)
-        self.assertIn("Spanish squats · 14.5k/mo KD0", d["body"])
+        self.assertIn("1. Spanish squats · 14.5k/mo KD0", d["body"])
+        self.assertEqual(d["ranks"], [2, 4, 1])
         self.assertIn("+1 more on the Desk", d["body"])
         self.assertEqual(d["priority"], "high")
 

@@ -718,8 +718,6 @@ function renderToday() {
     list.textContent = "No Claude news scan yet. Scans run at 07:05 and 16:05.";
   }
   leads.forEach((lead) => {
-    const decision = editorialResults?.decisions?.[lead.lead_id]?.decision || "";
-    const saving = savingDecisionIds.has(lead.lead_id);
     const evidence = (lead.evidence || []).slice(0, 6).map((e) =>
       `<li><a href="${escapeAttr(e.url || "#")}" target="_blank" rel="noopener">${escapeHtml(e.title || e.url || "")}</a> <span class="small-muted">${escapeHtml(e.source || "")} · ${escapeHtml(shortDate(e.published_at))}</span></li>`
     ).join("");
@@ -736,8 +734,6 @@ function renderToday() {
         ${lead.seo ? `<span class="seo-pill seo-${escapeAttr(lead.seo.verdict)}">${escapeHtml(lead.seo.label)}</span>` : ""}
         <span class="rating-pill rating-${confidenceRating(lead.confidence)}">${escapeHtml(lead.confidence || "")} confidence</span>
         <span>${escapeHtml(lead.evidence_strength || "")} evidence · ${escapeHtml(String(lead.independent_sources ?? ""))} sources · ${escapeHtml((lead.lanes || []).join(", "))}</span>
-        ${decision ? `<span class="decision-pill decision-${escapeAttr(decision)}">${decisionLabel(decision)}</span>` : ""}
-        ${saving ? `<span>Saving...</span>` : ""}
       </div>
       <h3>${escapeHtml(lead.title)}</h3>
       <dl class="recommendation-grid">
@@ -749,7 +745,7 @@ function renderToday() {
         ${seoHtml}
       </dl>
       <details><summary>Evidence (${(lead.evidence || []).length})</summary><ul class="evidence-list">${evidence}</ul></details>
-      <div class="lead-actions">${decisionButtons(lead.lead_id, decision, saving)}</div>
+      <div class="lead-actions">${voteButtons(todayBoard?.trend_scan?.scan_id, lead.rank, lead.vote)}</div>
     `;
     list.appendChild(card);
   });
@@ -862,6 +858,31 @@ function decisionLabel(decision) {
     hold: "Held",
     reject: "Rejected",
   }[decision] || "";
+}
+
+function voteButtons(scanId, rank, vote) {
+  if (scanId == null) return "";
+  return `
+    <button class="btn ${vote === "up" ? "btn-primary" : "btn-secondary"}" onclick="sendVote(${Number(scanId)}, ${Number(rank)}, 'up')">👍 More like this</button>
+    <button class="btn ${vote === "down" ? "btn-primary" : "btn-secondary"}" onclick="sendVote(${Number(scanId)}, ${Number(rank)}, 'down')">👎 Not for MFO</button>
+    <span class="small-muted">Claude learns from these and from what you publish.</span>
+  `;
+}
+
+async function sendVote(scanId, rank, vote) {
+  try {
+    const res = await fetch("/api/editorial/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scan_id: scanId, rank, vote }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const lead = (todayBoard?.trend_leads || []).find((l) => l.rank === rank);
+    if (lead) lead.vote = vote;
+    renderToday();
+  } catch (err) {
+    console.error("vote failed", err);
+  }
 }
 
 function decisionButtons(leadId, decision, saving) {

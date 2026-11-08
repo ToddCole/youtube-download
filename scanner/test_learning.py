@@ -53,7 +53,7 @@ class FeedbackTests(unittest.TestCase):
                 {"title": "Old post", "url": "https://m/old/", "date": "2026-09-01T10:00:00"},
             ]}))
             traffic = {"https://m/spanish-squat": {"clicks": 9, "impressions": 400}}
-            block = learning.build_feedback(conn, now=NOW, traffic=traffic, index_path=index)
+            block = learning.build_feedback(conn, open_stories_path=Path('/nonexistent/open_stories.json'), now=NOW, traffic=traffic, index_path=index)
             self.assertIn("Spanish squat: how to do it — 9 clicks, 400 impressions", block)
             self.assertNotIn("Old post", block)
             self.assertIn("F1 champion trains [👎 editor]", block)
@@ -64,7 +64,7 @@ class FeedbackTests(unittest.TestCase):
     def test_nothing_to_learn_from_returns_none(self):
         with tempfile.TemporaryDirectory() as tmp:
             conn = sqlite3.connect(Path(tmp) / "t.db")
-            self.assertIsNone(learning.build_feedback(conn, now=NOW, traffic={}, index_path=Path(tmp) / "none.json"))
+            self.assertIsNone(learning.build_feedback(conn, open_stories_path=Path('/nonexistent/open_stories.json'), now=NOW, traffic={}, index_path=Path(tmp) / "none.json"))
 
 
 if __name__ == "__main__":

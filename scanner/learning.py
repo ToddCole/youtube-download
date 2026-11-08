@@ -209,13 +209,16 @@ def page_traffic() -> dict[str, dict]:
 
 
 def build_feedback(conn, *, now: datetime | None = None, traffic: dict | None = None,
-                   index_path: Path = MFO_INDEX) -> str | None:
+                   index_path: Path = MFO_INDEX, open_stories_path: Path | None = None) -> str | None:
     now = now or datetime.now(timezone.utc)
     since = now - timedelta(days=LOOKBACK_DAYS)
+    import open_stories
+
+    open_block = open_stories.build_block(open_stories.load(open_stories_path or open_stories.OPEN_STORIES_PATH))
     picks = recent_picks(conn, since)
     posts = published_posts(since, index_path)
     if not picks and not posts:
-        return None
+        return open_block
     if traffic is None:
         try:
             traffic = page_traffic()
@@ -252,6 +255,8 @@ def build_feedback(conn, *, now: datetime | None = None, traffic: dict | None = 
         "- Never re-pick a story MFO has already published; a genuinely new development is a follow-up, say so.",
         "- Taste never overrides evidence: every pick still needs the cited signals.",
     ]
+    if open_block:
+        lines += ["", open_block]
     return "\n".join(lines)
 
 
@@ -269,6 +274,13 @@ def main() -> int:
             print(f"MFO index: {refresh_index()} pages")
         except Exception as exc:  # noqa: BLE001
             print(f"WARNING: index refresh failed: {exc}", file=sys.stderr)
+            status = 2
+        try:
+            import open_stories
+
+            print(f"open stories: {len(open_stories.refresh())}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"WARNING: open stories refresh failed: {exc}", file=sys.stderr)
             status = 2
     if args.poll:
         try:

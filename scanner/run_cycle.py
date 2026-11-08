@@ -1,4 +1,4 @@
-"""One scheduled cycle: collect -> learn -> (Claude slot) scan -> SEO -> digest -> health.
+"""One scheduled cycle: learn -> collect -> (Claude slot) scan -> SEO -> digest -> health.
 
 Run by launchd every 3h (see com.mfo.editorial-cycle.plist). Safe to run by
 hand:  python3 run_cycle.py [--claude|--no-claude] [--no-alert]
@@ -160,12 +160,13 @@ def run_cycle(with_claude: bool | None, alert: bool) -> int:
     cost = None
     try:
         with cycle_lock("scheduled cycle"):
-            steps.append(run_step("trend_collect", [py, "-m", "trend_radar", "collect"], 900))
             claude_slot = claude_enabled(with_claude)
-            # Learn: pull 👍/👎 taps every cycle (ntfy keeps them ~12h); re-read
-            # MFO's published posts before each Claude scan.
+            # Learn first: pull 👍/👎 taps every cycle (ntfy keeps them ~12h);
+            # before each Claude scan, re-read MFO's posts and its open stories,
+            # so the collect below already searches for their follow-ups.
             learn_args = [py, "learning.py", "--poll"] + (["--refresh-index"] if claude_slot else [])
             steps.append(run_step("learn", learn_args, 600))
+            steps.append(run_step("trend_collect", [py, "-m", "trend_radar", "collect"], 900))
             if claude_slot:
                 started = time.time()
                 step = run_step(

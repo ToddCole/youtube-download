@@ -50,6 +50,30 @@ def beat_source_configs(path: Path | None = None) -> list[dict]:
     return configs
 
 
+def open_story_source_configs() -> list[dict]:
+    """MFO pages that promised a follow-up (open_stories.json) -> one
+    Google News search each, so the follow-up evidence gets collected."""
+    try:
+        stories = json.loads((BASE_DIR / "open_stories.json").read_text(encoding="utf-8")).get("stories") or []
+    except (OSError, ValueError):
+        return []
+    return [{
+        "source_id": f"followup:{_slug(s['query'])[:60]}",
+        "name": f"MFO follow-up: {s['title']}",
+        "lane": "publisher",
+        "platform": "google-news",
+        "canonical_identifier": f"{s['query']} when:7d",
+        "collection_method": "google_news_rss_search",
+        "collection_interval_hours": 4,
+        "reliability": 5,
+        "source_role": "signal",
+        "active": True,
+        "known_restrictions": "Follow-up search for an open MFO story (open_stories.json).",
+        "engagement_available": False,
+        "mfo_url": s.get("url"),
+    } for s in stories if s.get("query")]
+
+
 def load_source_configs(path: Path | None = None) -> list[dict]:
     path = path or SOURCES_PATH
     if not path.exists():
@@ -57,7 +81,7 @@ def load_source_configs(path: Path | None = None) -> list[dict]:
     data = json.loads(path.read_text(encoding="utf-8"))
     configs = data.get("sources", []) if isinstance(data, dict) else []
     if path == SOURCES_PATH:
-        configs = configs + beat_source_configs()
+        configs = configs + beat_source_configs() + open_story_source_configs()
     return configs
 
 

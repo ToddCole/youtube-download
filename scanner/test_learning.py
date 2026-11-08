@@ -54,7 +54,7 @@ class FeedbackTests(unittest.TestCase):
             ]}))
             traffic = {"https://m/spanish-squat": {"clicks": 9, "impressions": 400}}
             block = learning.build_feedback(conn, open_stories_path=Path('/nonexistent/open_stories.json'), now=NOW, traffic=traffic, index_path=index)
-            self.assertIn("Spanish squat: how to do it — 9 clicks, 400 impressions", block)
+            self.assertIn("Spanish squat: how to do it — https://m/spanish-squat/ — 9 clicks, 400 impressions", block)
             self.assertNotIn("Old post", block)
             self.assertIn("F1 champion trains [👎 editor]", block)
             self.assertNotIn("Ancient story", block)

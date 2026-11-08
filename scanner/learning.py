@@ -234,7 +234,8 @@ def build_feedback(conn, *, now: datetime | None = None, traffic: dict | None = 
     for p in posts:
         t = traffic.get((p.get("url") or "").rstrip("/"))
         perf = f" — {t.get('clicks', 0)} clicks, {t.get('impressions', 0)} impressions" if t else ""
-        lines.append(f"- {p['date']} {p['title']}{perf}")
+        url = f" — {p['url']}" if p.get("url") else ""
+        lines.append(f"- {p['date']} {p['title']}{url}{perf}")
     if not posts:
         lines.append("- (nothing published)")
     lines += ["", "Your recent picks, newest first, with the editor's reaction:"]

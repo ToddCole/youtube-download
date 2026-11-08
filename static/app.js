@@ -764,7 +764,9 @@ function renderToday() {
   list.className = leads.length ? "recommendations-list" : "recommendations-list empty-state";
   list.replaceChildren();
   if (!leads.length) {
-    list.textContent = "No Claude news scan yet. Scans run at 07:05 and 16:05.";
+    list.textContent = meta
+      ? `Nothing strong enough to pick this scan. ${meta.corpus_summary || ""}`.trim()
+      : "No Claude news scan yet. Scans run at 07:05 and 16:05.";
   }
   leads.forEach((lead) => {
     const evidence = (lead.evidence || []).slice(0, 6).map((e) =>
@@ -780,6 +782,7 @@ function renderToday() {
     card.innerHTML = `
       <div class="lead-meta-row">
         <span class="source-pill">#${escapeHtml(String(lead.rank || ""))}</span>
+        ${lead.story_type === "update" ? `<span class="seo-pill seo-update_existing">Update MFO page</span>` : ""}
         ${lead.seo ? `<span class="seo-pill seo-${escapeAttr(lead.seo.verdict)}">${escapeHtml(lead.seo.label)}</span>` : ""}
         <span class="rating-pill rating-${confidenceRating(lead.confidence)}">${escapeHtml(lead.confidence || "")} confidence</span>
         <span>${escapeHtml(lead.evidence_strength || "")} evidence · ${escapeHtml(String(lead.independent_sources ?? ""))} sources · ${escapeHtml((lead.lanes || []).join(", "))}</span>
@@ -790,6 +793,7 @@ function renderToday() {
         <div><dt>Why now</dt><dd>${escapeHtml(lead.why_moving_now || "")}</dd></div>
         <div><dt>MFO angle</dt><dd>${escapeHtml(lead.likely_mfo_angle || "")}</dd></div>
         <div><dt>Check first</dt><dd>${checks.length ? escapeHtml(checks.join(" · ")) : "Nothing flagged"}</dd></div>
+        ${lead.update_url ? `<div><dt>Page to update</dt><dd><a href="${escapeAttr(lead.update_url)}" target="_blank" rel="noopener">${escapeHtml(lead.update_url.replace("https://mensfitnessonline.com.au", ""))}</a></dd></div>` : ""}
         <div><dt>Already on MFO?</dt><dd>${related || "No close match in the archive"}</dd></div>
         ${seoHtml}
       </dl>

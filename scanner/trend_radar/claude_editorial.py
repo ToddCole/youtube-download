@@ -10,7 +10,8 @@ import json
 from .claude_evidence import EvidenceRecord
 from .claude_schemas import ClaudeScanOutput, DiscoveryOutput
 
-MIN_CANDIDATES = 3
+MFO_URL_PREFIX = "https://mensfitnessonline.com.au/"
+MIN_CANDIDATES = 0  # a quiet day may have nothing worth MFO's time
 MAX_CANDIDATES = 6
 
 
@@ -20,11 +21,25 @@ class EditorialValidationError(ValueError):
     or a candidate count outside [3, 6]. Never silently repaired."""
 
 
+def _default_related_pages(text: str) -> list[dict]:
+    """MFO archive pages on the same subject (scanner/editorial_today.py);
+    empty when the archive index isn't available."""
+    try:
+        from editorial_today import related_mfo_pages
+    except ImportError:
+        return []
+    try:
+        return related_mfo_pages(text, limit=4)
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def build_editorial_user_content(
     discovery: DiscoveryOutput,
     evidence_by_id: dict[str, EvidenceRecord],
     expansion_results: dict[str, list[EvidenceRecord]],
     refs: dict[str, str] | None = None,
+    related_pages=_default_related_pages,
 ) -> str:
     def as_prompt(record: EvidenceRecord) -> dict:
         if refs:
@@ -35,6 +50,8 @@ def build_editorial_user_content(
     for wave in discovery.waves:
         original = [as_prompt(evidence_by_id[sid]) for sid in wave.signal_ids if sid in evidence_by_id]
         expanded = [as_prompt(r) for r in expansion_results.get(wave.wave_id, [])]
+        subject = " ".join([wave.working_label] + [e.get("title") or "" for e in original + expanded])
+        mfo_pages = [{"title": p.get("title"), "url": p.get("url")} for p in (related_pages(subject) if related_pages else [])]
         waves_payload.append(
             {
                 "wave_id": wave.wave_id,
@@ -42,6 +59,9 @@ def build_editorial_user_content(
                 "cross_source_reasoning": wave.cross_source_reasoning,
                 "ambiguous_name_caution": wave.ambiguous_name_caution,
                 "evidence": original + expanded,
+                # Existing MFO coverage of this subject (archive match): a pick on
+                # it is probably an update to one of these, not a new story.
+                "mfo_pages_on_this_subject": mfo_pages,
             }
         )
     return (
@@ -67,6 +87,12 @@ def repair_final_output(output: ClaudeScanOutput, known_signal_ids: set[str]) ->
         if not candidate.evidence:
             notes.append(f"editorial {candidate.headline[:60]!r}: dropped candidate with no valid evidence")
             continue
+        if candidate.update_url and not candidate.update_url.startswith(MFO_URL_PREFIX):
+            notes.append(f"editorial {candidate.headline[:60]!r}: dropped non-MFO update_url {candidate.update_url!r}")
+            candidate.update_url = None
+        if candidate.story_type == "update" and not candidate.update_url:
+            notes.append(f"editorial {candidate.headline[:60]!r}: update without a valid MFO page, treated as new")
+            candidate.story_type = "new"
         kept.append(candidate)
     for index, candidate in enumerate(kept, start=1):
         candidate.rank = index

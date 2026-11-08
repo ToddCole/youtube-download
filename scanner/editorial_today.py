@@ -102,6 +102,8 @@ def candidate_to_lead(scan_id: int, generated_at: str | None, candidate: dict) -
         ],
         "scan_generated_at": generated_at,
         "rank": candidate.get("rank"),
+        "story_type": candidate.get("story_type") or "new",
+        "update_url": candidate.get("update_url"),
     }
     lead["related_mfo_pages"] = related_mfo_pages(f"{lead['title']} {lead['source_summary']}")
     return lead

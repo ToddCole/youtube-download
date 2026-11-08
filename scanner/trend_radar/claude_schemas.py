@@ -54,9 +54,20 @@ class EvidenceItem(BaseModel):
     url: str | None = None
 
 
+StoryType = Literal["new", "update"]
+
+
 class Candidate(BaseModel):
     rank: int = Field(ge=1, le=6)
     headline: str
+    story_type: StoryType = Field(
+        default="new",
+        description='"update" when MFO already has a page on this subject and the pick is to update it; otherwise "new".',
+    )
+    update_url: str | None = Field(
+        default=None,
+        description="For an update: the existing MFO page URL, exactly as given (mfo_pages_on_this_subject, EDITOR FEEDBACK or OPEN MFO STORIES). Never guessed.",
+    )
     topic_summary: str = Field(description="What the story actually is.")
     why_moving_now: str
     mfo_angle: str = Field(description="The publishable MFO angle on this story.")
@@ -83,6 +94,6 @@ class ClaudeScanOutput(BaseModel):
     call completes -- see claude_scan.py:assemble_final_result()."""
 
     corpus_summary: str = Field(description="A short summary of what the supplied evidence corpus contained overall.")
-    candidates: list[Candidate] = Field(description="3 to 6 editorial candidates, ranked.")
-    watchlist: list[str] = Field(default_factory=list, description="Optional short list of borderline items worth watching but not yet a full candidate.")
+    candidates: list[Candidate] = Field(description="0 to 6 picks, ranked by what MFO should do first. Never padded: return fewer, or none, when fewer clear the bar.")
+    watchlist: list[str] = Field(default_factory=list, description="Items worth holding (too early, too narrow, or needing an original angle), one line each with the reason.")
     rejected_or_merged_topics: list[str] = Field(default_factory=list, description="Short notes on waves that were considered and rejected or merged into a candidate above.")

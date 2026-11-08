@@ -18,7 +18,7 @@ sys.path.insert(0, str(SCANNER_DIR))
 from trend_radar import db as trdb
 from trend_radar.claude_client import MissingApiKeyError, UsageTotals, resolve_model
 from trend_radar.claude_discovery import DiscoveryValidationError, validate_discovery_output
-from trend_radar.claude_editorial import EditorialValidationError, validate_final_output
+from trend_radar.claude_editorial import EditorialValidationError, repair_final_output, validate_final_output
 from trend_radar.claude_evidence import build_evidence_packet
 from trend_radar.claude_expansion import MAX_TOTAL_SEARCHES, run_expansion
 from trend_radar.claude_schemas import (
@@ -282,9 +282,47 @@ class EditorialValidationTests(unittest.TestCase):
             validate_final_output(output, known_signal_ids={"sig-1"}, evidence_by_id=self._known())
 
     def test_candidate_count_out_of_range_rejected(self):
-        output = ClaudeScanOutput(corpus_summary="s", candidates=[self._valid_candidate(rank=1)])
+        output = ClaudeScanOutput(corpus_summary="s", candidates=[self._valid_candidate(rank=1) for _ in range(7)])
         with self.assertRaises(EditorialValidationError):
             validate_final_output(output, known_signal_ids={"sig-1"}, evidence_by_id=self._known())
+
+    def test_one_pick_and_no_picks_are_both_valid(self):
+        # A quiet day is allowed to return fewer picks, or none, rather than pad.
+        validate_final_output(ClaudeScanOutput(corpus_summary="s", candidates=[self._valid_candidate(rank=1)]),
+                              known_signal_ids={"sig-1"}, evidence_by_id=self._known())
+        validate_final_output(ClaudeScanOutput(corpus_summary="nothing today", candidates=[]),
+                              known_signal_ids={"sig-1"}, evidence_by_id=self._known())
+
+    def test_non_mfo_update_url_is_dropped_and_pick_becomes_new(self):
+        cand = self._valid_candidate(rank=1)
+        cand.story_type, cand.update_url = "update", "https://example.com/guessed/"
+        output = ClaudeScanOutput(corpus_summary="s", candidates=[cand])
+        notes = repair_final_output(output, {"sig-1"})
+        self.assertIsNone(output.candidates[0].update_url)
+        self.assertEqual(output.candidates[0].story_type, "new")
+        self.assertTrue(any("non-MFO update_url" in n for n in notes))
+
+    def test_editorial_input_lists_existing_mfo_pages_per_wave(self):
+        from trend_radar.claude_editorial import build_editorial_user_content
+
+        discovery = DiscoveryOutput(waves=[DiscoveryWave(wave_id="w1", working_label="Regulator tests", signal_ids=[], cross_source_reasoning="x")])
+        seen = []
+
+        def related(text):
+            seen.append(text)
+            return [{"title": "Existing explainer", "url": "https://mensfitnessonline.com.au/existing/", "shared_words": 3}]
+
+        content = build_editorial_user_content(discovery, {}, {}, related_pages=related)
+        self.assertIn("mfo_pages_on_this_subject", content)
+        self.assertIn("https://mensfitnessonline.com.au/existing/", content)
+        self.assertIn("Regulator tests", seen[0])
+
+    def test_mfo_update_url_is_kept(self):
+        cand = self._valid_candidate(rank=1)
+        cand.story_type, cand.update_url = "update", "https://mensfitnessonline.com.au/some-story/"
+        output = ClaudeScanOutput(corpus_summary="s", candidates=[cand])
+        repair_final_output(output, {"sig-1"})
+        self.assertEqual(output.candidates[0].story_type, "update")
 
     def test_duplicate_rank_rejected(self):
         output = ClaudeScanOutput(corpus_summary="s", candidates=[self._valid_candidate(rank=1), self._valid_candidate(rank=1), self._valid_candidate(rank=1)])
@@ -380,7 +418,10 @@ class UsageTests(unittest.TestCase):
 # --- 12. No acceptance-target terms in production prompts ----------------
 
 class NoForbiddenTermsTests(unittest.TestCase):
-    FORBIDDEN = ("Tom Holland", "tom holland", "Cindy", "cindy", "Spider-Man", "spider-man", "spider man", "27 rounds")
+    FORBIDDEN = ("Tom Holland", "tom holland", "Cindy", "cindy", "Spider-Man", "spider-man", "spider man", "27 rounds",
+                 # 9 Nov 2026 comparison targets (Todd's ChatGPT scan) -- must be found, not prompted.
+                 "Tate", "Steven Miles", "Masters Games", "TGA", "peptide", "Peptide", "handgrip", "Synedica",
+                 "Physical 100", "Wolverine")
 
     def test_prompts_contain_no_forbidden_terms(self):
         from trend_radar import claude_prompts
@@ -519,15 +560,16 @@ class EndToEndMockedScanTests(ClaudeTestCase):
             self.assertAlmostEqual(ledger.spent_today(), 3.0, places=4)  # $2 in + $1 out
             self.assertAlmostEqual(result["usage"]["cost_usd"], 3.0, places=4)
 
-    def test_editorial_retries_once_when_too_few_candidates_survive(self):
+    def test_editorial_retries_once_when_answer_is_invalid(self):
         with tempfile.TemporaryDirectory() as tmp:
             conn = self.connect(Path(tmp) / "t.db")
             self.seed_source_and_run(conn)
             self.add_signal(conn, url="https://example.com/one", title="Story one")
             discovery = DiscoveryOutput(waves=[DiscoveryWave(wave_id="w", working_label="A", signal_ids=["S001"], cross_source_reasoning="x")])
-            thin = ClaudeScanOutput(corpus_summary="c", candidates=[self._cand(1, ["S001"])])
+            bad = ClaudeScanOutput(corpus_summary="c", candidates=[self._cand(1, ["S001"])])
+            bad.candidates[0].evidence[0].url = "https://example.com/not-the-stored-url"
             good = ClaudeScanOutput(corpus_summary="c", candidates=[self._cand(i, ["S001"]) for i in (1, 2, 3)])
-            client = self._client_returning(*(self._fake_parsed_response(o) for o in (discovery, thin, good)))
+            client = self._client_returning(*(self._fake_parsed_response(o) for o in (discovery, bad, good)))
             result = self._run(conn, client)
             self.assertEqual(len(result["candidates"]), 3)
             self.assertEqual(result["usage"]["api_calls"], 3)

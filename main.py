@@ -38,6 +38,14 @@ EDITORIAL_GATES_CONFIG_PATH = SCANNER_DIR / "editorial_gates_config.json"
 
 if str(SCANNER_DIR) not in sys.path:
     sys.path.insert(0, str(SCANNER_DIR))
+
+# yt-dlp needs ffmpeg (Homebrew: /usr/local/bin on Intel, /opt/homebrew/bin on
+# Apple Silicon). Launchers with a bare PATH can't see it, so add both.
+_path_parts = os.environ.get("PATH", "").split(os.pathsep)
+for _brew_bin in ("/opt/homebrew/bin", "/usr/local/bin"):
+    if _brew_bin not in _path_parts:
+        _path_parts.insert(0, _brew_bin)
+os.environ["PATH"] = os.pathsep.join(_path_parts)
 import settings  # noqa: E402,F401  (loads .env)
 import editorial_gates  # noqa: E402
 from cycle_lock import LockBusy, cycle_lock  # noqa: E402
@@ -1602,6 +1610,53 @@ def start_editorial_scan(scanner_type: Literal["creator", "news", "research", "b
     }
     background_tasks.add_task(run_scanner_job, job_id, scanner_type)
     return {"job_id": job_id, "scanner_type": scanner_type, "status": "queued"}
+
+
+claude_scan_job: dict = {"status": "idle"}
+
+
+def run_claude_scan_job() -> None:
+    """Desk 'Scan now': one full cycle with the Claude scan forced on.
+
+    Same path as the 07:05/16:05 schedule (collect -> learn -> Claude scan ->
+    SEO -> phone digest), so it shares the cycle lock, the spend cap and the
+    pipeline_runs record.
+    """
+    claude_scan_job.update({"status": "running", "started_at": utc_iso(), "finished_at": None, "message": ""})
+    try:
+        result = subprocess.run(
+            [sys.executable, "run_cycle.py", "--claude"],
+            cwd=str(SCANNER_DIR),
+            capture_output=True,
+            text=True,
+            timeout=3000,
+            check=False,
+        )
+        out = (result.stdout or "").strip()
+        if "lock: skipped" in out:
+            status, message = "failed", "The scheduled cycle is already running; try again in a few minutes."
+        elif result.returncode == 0 and "claude_scan: ok" in out:
+            status, message = "completed", ""
+        else:
+            status = "failed"
+            message = concise_scanner_error(result.stdout, result.stderr) or "Scan did not finish; see the last cycle status."
+    except subprocess.TimeoutExpired:
+        status, message = "failed", "Scan timed out after 50 minutes."
+    claude_scan_job.update({"status": status, "finished_at": utc_iso(), "message": message})
+
+
+@app.post("/api/editorial/claude-scan/run")
+def start_claude_scan(background_tasks: BackgroundTasks):
+    if claude_scan_job.get("status") == "running":
+        raise HTTPException(status_code=409, detail="A Claude scan is already running.")
+    claude_scan_job.update({"status": "running", "started_at": utc_iso(), "finished_at": None, "message": ""})
+    background_tasks.add_task(run_claude_scan_job)
+    return claude_scan_job
+
+
+@app.get("/api/editorial/claude-scan/job")
+def get_claude_scan_job():
+    return claude_scan_job
 
 
 @app.get("/api/editorial/scans/status")

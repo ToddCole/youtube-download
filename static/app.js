@@ -685,6 +685,55 @@ async function refreshToday() {
   }
 }
 
+// --- Scan now: run one Claude scan cycle on demand -------------------------
+let claudeScanPoll = null;
+
+async function runClaudeScanNow() {
+  if (!confirm("Run a Claude scan now? It uses API credit (about US$0.40) and sends the phone digest.")) return;
+  hideEditorialError();
+  try {
+    const res = await fetch("/api/editorial/claude-scan/run", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(getErrorMessage(data, "Could not start the scan"));
+    renderClaudeScanJob(data);
+  } catch (e) {
+    showEditorialError(`Scan now: ${e.message}`);
+  }
+}
+
+async function checkClaudeScanJob() {
+  try {
+    const res = await fetch("/api/editorial/claude-scan/job");
+    if (res.ok) renderClaudeScanJob(await res.json());
+  } catch (e) {
+    /* server restarting; next poll retries */
+  }
+}
+
+function renderClaudeScanJob(job) {
+  const btn = document.getElementById("claude-scan-btn");
+  const el = document.getElementById("claude-scan-status");
+  if (!btn || !el) return;
+  const running = job?.status === "running";
+  btn.disabled = running;
+  btn.textContent = running ? "Scanning…" : "Scan now";
+  if (running) {
+    el.textContent = `Started ${shortDate(job.started_at)} · takes about 4–5 min`;
+    if (!claudeScanPoll) claudeScanPoll = setInterval(checkClaudeScanJob, 5000);
+    return;
+  }
+  if (claudeScanPoll) {
+    clearInterval(claudeScanPoll);
+    claudeScanPoll = null;
+    refreshToday();
+  }
+  if (job?.status === "completed") el.textContent = `Scan finished ${shortDate(job.finished_at)} ·`;
+  else if (job?.status === "failed") {
+    el.textContent = "";
+    showEditorialError(`Scan now failed: ${job.message || "unknown error"}`);
+  } else el.textContent = "";
+}
+
 function renderPipelineStatus(data) {
   const el = document.getElementById("pipeline-status");
   if (!el) return;
@@ -1107,4 +1156,5 @@ function escapeAttr(value) {
 
 refreshEditorialResults();
 refreshToday();
+checkClaudeScanJob();
 loadLatestAgentReview();

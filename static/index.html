@@ -108,7 +108,11 @@
               <h2>Today</h2>
               <p id="today-meta">Claude's picks from the latest news scan.</p>
             </div>
-            <span id="pipeline-status" class="small-muted"></span>
+            <div>
+              <button id="claude-scan-btn" class="btn btn-secondary" onclick="runClaudeScanNow()">Scan now</button>
+              <span id="claude-scan-status" class="small-muted"></span>
+              <span id="pipeline-status" class="small-muted"></span>
+            </div>
           </div>
           <div id="today-list" class="recommendations-list empty-state">No Claude news scan yet. Scans run at 07:05 and 16:05.</div>
           <details id="emerging-panel" class="rejected-panel hidden" open>

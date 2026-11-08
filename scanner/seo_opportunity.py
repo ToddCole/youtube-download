@@ -46,8 +46,11 @@ DEFAULT_DAILY_CREDIT_CAP = 150
 EST_CREDITS_PER_CALL = 15
 EST_CREDITS_PER_KEYWORD = 1
 
-WRITE_NOW_MIN_VOLUME = 200
+# MFO is an Australian site: verdicts are judged on AU numbers. US numbers
+# are kept for display and for the "US demand only" verdict.
+WRITE_NOW_MIN_AU_VOLUME = 50
 WRITE_NOW_MAX_KD = 20
+US_ONLY_MIN_VOLUME = 200
 
 
 class OpenSEOError(RuntimeError):
@@ -316,8 +319,9 @@ class Verdict:
 
 
 def decide(demand: dict, footing: list[dict], related_pages: list[dict]) -> Verdict:
-    volume = demand.get("total_volume") or 0
-    kd = demand.get("best_kd")
+    au = demand.get("au_volume") or 0
+    us = demand.get("us_volume") or 0
+    kd = demand.get("best_kd")  # AU difficulty; None when the provider has no score
     if footing:
         top = footing[0]
         pos = top.get("position")
@@ -326,20 +330,32 @@ def decide(demand: dict, footing: list[dict], related_pages: list[dict]) -> Verd
             "update_existing", "Update existing page",
             f"MFO already gets {top['impressions']} impressions for '{top['query']}' ({pos_txt}) on {top.get('page') or 'a page'}",
         )
-    if related_pages and volume > 0:
+    if related_pages and (au or us):
         return Verdict("update_existing", "Update existing page",
-                       f"{volume:,}/mo search demand and MFO already has a page on '{related_pages[0].get('query')}': {related_pages[0].get('title')}")
-    if volume >= WRITE_NOW_MIN_VOLUME and (kd is None or kd <= WRITE_NOW_MAX_KD):
-        kd_txt = f"KD {kd}" if kd is not None else "KD n/a"
+                       f"AU {au:,}/mo, US {us:,}/mo search demand and MFO already has a page on "
+                       f"'{related_pages[0].get('query')}': {related_pages[0].get('title')}")
+    keyword = demand.get("best_keyword")
+    if au >= WRITE_NOW_MIN_AU_VOLUME and (kd is None or kd <= WRITE_NOW_MAX_KD):
+        kd_txt = f"AU KD {kd}" if kd is not None else "AU KD unknown, check before committing"
         return Verdict("write_now", "Write now",
-                       f"{volume:,}/mo searches ({demand.get('best_keyword')}, {kd_txt}) and no MFO page yet")
-    if volume == 0:
+                       f"{au:,}/mo AU searches ({keyword}, {kd_txt}) and no MFO page yet")
+    if au >= WRITE_NOW_MIN_AU_VOLUME and kd is not None and kd > WRITE_NOW_MAX_KD:
+        return Verdict("skip", "Low SEO upside",
+                       f"AU demand exists ({au:,}/mo) but AU KD {kd} is above {WRITE_NOW_MAX_KD}: write it for news value only")
+    if us >= US_ONLY_MIN_VOLUME and au < WRITE_NOW_MIN_AU_VOLUME:
+        return Verdict("us_only", "US demand only",
+                       f"{us:,}/mo US searches ({keyword}) but only {au:,}/mo in Australia: news value first, not an AU search play")
+    if not au and not us:
         return Verdict("watch", "Watch",
                        "No measurable search demand yet: news value only. Re-check GSC in 48h for new impressions")
-    if kd is not None and kd > WRITE_NOW_MAX_KD:
-        return Verdict("skip", "Low SEO upside",
-                       f"Demand exists ({volume:,}/mo) but KD {kd} is above {WRITE_NOW_MAX_KD}: write it for news value only")
-    return Verdict("watch", "Watch", f"Small demand ({volume}/mo): news value first")
+    return Verdict("watch", "Watch", f"Small demand (AU {au}/mo, US {us}/mo): news value first")
+
+
+def _kd(metrics: dict):
+    """Keyword difficulty, with 0 treated as unknown: the provider returns 0
+    when it has no score, which made hard keywords look free."""
+    kd = metrics.get("keyword_difficulty")
+    return kd if kd else None
 
 
 def demand_for(conn, queries: list[str]) -> dict:
@@ -350,19 +366,20 @@ def demand_for(conn, queries: list[str]) -> dict:
             metrics = cached_metrics(conn, query, location)
             metrics = metrics if isinstance(metrics, dict) else {}
             row[f"{location}_volume"] = metrics.get("search_volume") or 0
-            row[f"{location}_kd"] = metrics.get("keyword_difficulty")
+            row[f"{location}_kd"] = _kd(metrics)
         row["volume"] = sum(row[f"{loc}_volume"] for loc in LOCATIONS)
         per_keyword.append(row)
-    per_keyword.sort(key=lambda r: -r["volume"])
+    # Best keyword = most AU searches; US volume only breaks ties.
+    per_keyword.sort(key=lambda r: (-r["AU_volume"], -r["US_volume"]))
     best = per_keyword[0] if per_keyword else {}
-    kds = [r[f"{loc}_kd"] for r in per_keyword[:1] for loc in LOCATIONS if r.get(f"{loc}_kd") is not None]
     return {
         "keywords": per_keyword,
         "best_keyword": best.get("keyword"),
         "total_volume": best.get("volume", 0),
         "au_volume": best.get("AU_volume", 0),
         "us_volume": best.get("US_volume", 0),
-        "best_kd": min(kds) if kds else None,
+        "best_kd": best.get("AU_kd"),
+        "us_kd": best.get("US_kd"),
     }
 
 

@@ -13,8 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import seo_opportunity as seo  # noqa: E402
 
 
-def demand(volume, kd, keyword="x"):
-    return {"total_volume": volume, "best_kd": kd, "best_keyword": keyword}
+def demand(volume, kd, keyword="x", us=0):
+    """volume = AU searches/mo; kd = AU keyword difficulty."""
+    return {"au_volume": volume, "us_volume": us, "best_kd": kd, "best_keyword": keyword}
 
 
 class VerdictTests(unittest.TestCase):
@@ -34,6 +35,21 @@ class VerdictTests(unittest.TestCase):
 
     def test_high_kd_is_low_upside(self):
         self.assertEqual(seo.decide(demand(5000, 45), [], []).code, "skip")
+
+    def test_us_heavy_demand_is_us_only_not_write_now(self):
+        # 6 Nov scan: "metabolic walking" had 5,400 US searches and 0 in AU.
+        v = seo.decide(demand(0, None, "metabolic walking", us=5400), [], [])
+        self.assertEqual(v.code, "us_only")
+
+    def test_small_au_demand_is_not_write_now_even_with_big_us(self):
+        # 6 Nov scan: "james bond workout" was 30 AU / 260 US, AU KD 36.
+        v = seo.decide(demand(30, 36, "james bond workout", us=260), [], [])
+        self.assertEqual(v.code, "us_only")
+
+    def test_unknown_au_kd_still_write_now_but_flagged(self):
+        v = seo.decide(demand(400, None), [], [])
+        self.assertEqual(v.code, "write_now")
+        self.assertIn("KD unknown", v.reason)
 
     def test_small_demand_is_watch(self):
         self.assertEqual(seo.decide(demand(20, 0), [], []).code, "watch")
@@ -84,9 +100,31 @@ class CacheAndLedgerTests(unittest.TestCase):
             d = seo.demand_for(conn, ["hyrox app", "peptides"])
             self.assertEqual(d["best_keyword"], "peptides")
             self.assertEqual(d["total_volume"], 21000)
-            self.assertEqual(d["best_kd"], 10)
+            self.assertEqual(d["au_volume"], 1000)
+            self.assertEqual(d["best_kd"], 10)  # AU difficulty, not the lower of AU/US
+            self.assertEqual(d["us_kd"], 30)
+            hyrox = next(k for k in d["keywords"] if k["keyword"] == "hyrox app")
+            self.assertIsNone(hyrox["US_kd"])  # provider's 0 means "no score"
             self.assertIsNone(seo.cached_metrics(conn, "hyrox app", "AU"))
             self.assertIs(seo.cached_metrics(conn, "unknown", "AU"), False)
+
+    def test_best_keyword_is_by_au_volume_and_kd_comes_from_au(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = sqlite3.connect(Path(tmp) / "t.db")
+            seo.ensure_tables(conn)
+            now = seo.utc_now()
+            conn.executemany(
+                "INSERT INTO seo_keyword_cache VALUES (?,?,?,?)",
+                [
+                    ("james bond workout", "AU", now, '{"search_volume": 30, "keyword_difficulty": 36}'),
+                    ("james bond workout", "US", now, '{"search_volume": 260, "keyword_difficulty": 0}'),
+                    ("bond 26 casting", "AU", now, '{"search_volume": 10, "keyword_difficulty": 8}'),
+                ],
+            )
+            d = seo.demand_for(conn, ["bond 26 casting", "james bond workout"])
+            self.assertEqual(d["best_keyword"], "james bond workout")
+            self.assertEqual(d["best_kd"], 36)
+            self.assertNotEqual(seo.decide(d, [], []).code, "write_now")
 
     def test_credit_cap(self):
         with tempfile.TemporaryDirectory() as tmp:

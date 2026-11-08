@@ -21,9 +21,9 @@ SCANNER_DIR = Path(__file__).resolve().parent
 TREND_DB = SCANNER_DIR / "trend_radar.db"
 STATE_FILE = SCANNER_DIR / "digest_state.json"
 TOP_N = 3
-# A Write now this strong earns a high-priority push.
-STRONG_WRITE_NOW_VOLUME = 1000
-VERDICT_MARK = {"write_now": "🟢", "update_existing": "🔵", "watch": "🟠", "skip": "⚪"}
+# A Write now with this many AU searches a month earns a high-priority push.
+STRONG_WRITE_NOW_VOLUME = 500
+VERDICT_MARK = {"write_now": "🟢", "update_existing": "🔵", "watch": "🟠", "us_only": "🟡", "skip": "⚪"}
 
 
 def _short(headline: str, limit: int = 48) -> str:
@@ -41,27 +41,30 @@ def _volume_line(seo: dict | None) -> str:
         return "not SEO-scored"
     demand = seo.get("demand") or {}
     kw = demand.get("best_keyword")
-    vol = demand.get("total_volume") or 0
+    vol = demand.get("au_volume") or 0
+    us = demand.get("us_volume") or 0
     kd = demand.get("best_kd")
     if seo.get("verdict") == "update_existing" and seo.get("gsc"):
         g = seo["gsc"][0]
         return f"ranking for '{g.get('query')}'"
+    if kw and not vol and us:
+        return f"US only {_k(us)}/mo"
     if not kw or not vol:
         return "no demand yet"
     kd_txt = f" KD{kd}" if kd is not None else ""
-    return f"{_k(vol)}/mo{kd_txt}"
+    return f"AU {_k(vol)}/mo{kd_txt}"
 
 
 def build_digest(scan: dict, scores: dict[int, dict], emerging: dict | None, now: datetime | None = None) -> dict:
     now = now or datetime.now()
     slot = "Morning" if now.hour < 12 else "Afternoon"
     picks = sorted(scan.get("candidates") or [], key=lambda c: c.get("rank") or 99)
-    order = {"write_now": 0, "update_existing": 1, "watch": 2, "skip": 3}
+    order = {"write_now": 0, "update_existing": 1, "watch": 2, "us_only": 3, "skip": 4}
     # Lead with the best SEO bets (biggest Write now first), then Claude's rank.
     def key(c):
         seo = scores.get(c.get("rank")) or {}
-        volume = (seo.get("demand") or {}).get("total_volume") or 0
-        return (order.get(seo.get("verdict"), 4), -volume if seo.get("verdict") == "write_now" else 0, c.get("rank") or 99)
+        volume = (seo.get("demand") or {}).get("au_volume") or 0
+        return (order.get(seo.get("verdict"), 5), -volume if seo.get("verdict") == "write_now" else 0, c.get("rank") or 99)
 
     picks.sort(key=key)
 
@@ -77,7 +80,7 @@ def build_digest(scan: dict, scores: dict[int, dict], emerging: dict | None, now
     write_now = [r for r, s in scores.items() if s.get("verdict") == "write_now"]
     strong = [
         r for r in write_now
-        if ((scores[r].get("demand") or {}).get("total_volume") or 0) >= STRONG_WRITE_NOW_VOLUME
+        if ((scores[r].get("demand") or {}).get("au_volume") or 0) >= STRONG_WRITE_NOW_VOLUME
     ]
     rows = (emerging or {}).get("rows") or []
     if rows:

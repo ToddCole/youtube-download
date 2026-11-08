@@ -19,19 +19,20 @@ SCAN = {"_scan_id": 7, "candidates": [
 ]}
 
 
-def score(verdict, volume, kw="k", kd=5):
-    return {"verdict": verdict, "label": verdict, "demand": {"best_keyword": kw, "total_volume": volume, "best_kd": kd}}
+def score(verdict, volume, kw="k", kd=5, us=0):
+    return {"verdict": verdict, "label": verdict,
+            "demand": {"best_keyword": kw, "au_volume": volume, "us_volume": us, "best_kd": kd}}
 
 
 class DigestTests(unittest.TestCase):
     def test_write_now_picks_lead_and_strong_one_is_high_priority(self):
-        scores = {1: score("watch", 0), 2: score("write_now", 14500, "spanish squat", 0),
+        scores = {1: score("watch", 0), 2: score("write_now", 14500, "spanish squat", None),
                   3: score("skip", 5000, kd=40), 4: score("write_now", 300)}
         d = digest.build_digest(SCAN, scores, None, now=datetime(2026, 11, 7, 7, 5))
         self.assertEqual(d["title"], "MFO Morning picks: 2 Write now")
         first = d["body"].splitlines()[0]
         self.assertIn("Spanish squats", first)
-        self.assertIn("1. Spanish squats · 14.5k/mo KD0", d["body"])
+        self.assertIn("1. Spanish squats · AU 14.5k/mo", d["body"])
         self.assertEqual(d["ranks"], [2, 4, 1])
         self.assertEqual(d["headlines"][0], "Spanish squats")
         self.assertIn("+1 more on the Desk", d["body"])
@@ -44,6 +45,12 @@ class DigestTests(unittest.TestCase):
         self.assertTrue(d["title"].startswith("MFO Afternoon picks"))
         self.assertEqual(d["priority"], "default")
         self.assertIn("📈 '100 physique france' 1.2k impr, new", d["body"])
+
+    def test_us_only_pick_says_so_and_sorts_below_watch(self):
+        scores = {1: score("us_only", 0, "metabolic walking", us=5400), 2: score("watch", 0)}
+        d = digest.build_digest(SCAN, scores, None)
+        self.assertEqual(d["ranks"][:2], [2, 1])
+        self.assertIn("🟡 2. Almgren wins NYC · US only 5.4k/mo", d["body"])
 
     def test_unscored_scan_still_digests(self):
         d = digest.build_digest(SCAN, {}, None)

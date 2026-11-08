@@ -90,33 +90,52 @@ def build_evidence_packet(
     max_signals: int,
     now: datetime | None = None,
 ) -> list[EvidenceRecord]:
-    """Signals from the last `lookback_days`, newest first, deduplicated
-    by canonical_url (falling back to url, then to the signal_id itself
-    for URL-less manual notes) -- exact identity only. Capped at
-    `max_signals` records."""
+    """Signals from the last `lookback_days`, deduplicated by canonical_url
+    (falling back to url, then to the signal_id itself for URL-less manual
+    notes) -- exact identity only. Capped at `max_signals` records.
+
+    Selection is a fair share across sources: each source's newest signal
+    first, then each source's second-newest, and so on, so one prolific
+    feed (Men's Journal posts ~90/day) can't crowd a TGA alert or a single
+    study out of the packet. The result is returned newest first."""
     now = now or datetime.now(timezone.utc)
     cutoff = (now - timedelta(days=lookback_days)).isoformat(timespec="seconds").replace("+00:00", "Z")
     rows = conn.execute(
-        """SELECT signal_id, lane, platform, source_name, author_or_account,
+        """SELECT signal_id, source_id, lane, platform, source_name, author_or_account,
                   published_at, timestamp_precision, title, body_text, url,
                   canonical_url, first_seen_at, created_by_run_id
            FROM raw_signals
-           WHERE COALESCE(published_at, first_seen_at) >= ?
+           -- PubMed dates are journal issue dates, often weeks before a paper
+           -- is indexed; for papers, "new" means newly seen by the collector.
+           WHERE (CASE WHEN platform = 'pubmed' THEN first_seen_at
+                       ELSE COALESCE(published_at, first_seen_at) END) >= ?
            ORDER BY COALESCE(published_at, first_seen_at) DESC, signal_id ASC""",
         (cutoff,),
     ).fetchall()
 
     seen_identity: set[str] = set()
-    records: list[EvidenceRecord] = []
-    for row in rows:
+    per_source: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:  # newest first
         identity = row["canonical_url"] or row["url"] or f"signal:{row['signal_id']}"
         if identity in seen_identity:
             continue
         seen_identity.add(identity)
-        records.append(_row_to_record(row))
-        if len(records) >= max_signals:
-            break
-    return records
+        per_source.setdefault(row["source_id"], []).append(row)
+
+    chosen: list[sqlite3.Row] = []
+    depth = 0
+    while len(chosen) < max_signals and any(len(q) > depth for q in per_source.values()):
+        # Within a round, newer signals go first, so a cut mid-round keeps the freshest.
+        round_rows = sorted(
+            (q[depth] for q in per_source.values() if len(q) > depth),
+            key=lambda r: (r["published_at"] or r["first_seen_at"] or ""),
+            reverse=True,
+        )
+        chosen.extend(round_rows[: max_signals - len(chosen)])
+        depth += 1
+    order = {id(row): i for i, row in enumerate(rows)}
+    chosen.sort(key=lambda r: order[id(r)])
+    return [_row_to_record(row) for row in chosen]
 
 
 def record_for_signal_id(conn: sqlite3.Connection, signal_id: str) -> EvidenceRecord | None:

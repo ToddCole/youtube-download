@@ -176,6 +176,23 @@ class EvidencePacketTests(ClaudeTestCase):
             records = build_evidence_packet(conn, lookback_days=30, max_signals=3)
             self.assertEqual(len(records), 3)
 
+    def test_prolific_source_cannot_crowd_out_a_quiet_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = self.connect(Path(tmp) / "t.db")
+            self.seed_source_and_run(conn)
+            self.seed_source_and_run(conn, source_id="research:quiet", lane="research")
+            # One older signal from a quiet source, then 20 newer ones from a busy feed.
+            self.add_signal(conn, source_id="research:quiet", lane="research", url="https://example.com/tga",
+                            title="Regulator alert", published_at="2026-01-01T00:00:00Z")
+            for i in range(20):
+                self.add_signal(conn, url=f"https://example.com/busy/{i}", title=f"Busy {i}",
+                                published_at=f"2026-01-02T{i:02d}:00:00Z")
+            records = build_evidence_packet(conn, lookback_days=36500, max_signals=5)
+            titles = [r.title for r in records]
+            self.assertIn("Regulator alert", titles)
+            self.assertEqual(len(records), 5)
+            self.assertEqual(titles[0], "Busy 19")  # still returned newest first
+
 
 # --- 5. Structured discovery parsing + 6. Invented signal IDs rejected --
 

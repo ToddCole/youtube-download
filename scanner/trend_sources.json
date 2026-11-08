@@ -529,8 +529,8 @@
       "collection_interval_hours": 4,
       "reliability": 6,
       "source_role": "signal",
-      "active": true,
-      "known_restrictions": "Live collection requires REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET; anonymous access is real but rate-limit fragile per Phase 0 findings.",
+      "active": false,
+      "known_restrictions": "Disabled 9 Nov 2026: returns nothing without REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET. Re-enable once credentials are in .env.",
       "engagement_available": false
     },
     {
@@ -543,8 +543,8 @@
       "collection_interval_hours": 4,
       "reliability": 6,
       "source_role": "signal",
-      "active": true,
-      "known_restrictions": "Same as r/Fitness. Confirmed reachable (single anonymous request) during Phase 0.",
+      "active": false,
+      "known_restrictions": "Disabled 9 Nov 2026: returns nothing without REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET. Re-enable once credentials are in .env.",
       "engagement_available": false
     },
     {
@@ -557,8 +557,8 @@
       "collection_interval_hours": 4,
       "reliability": 5,
       "source_role": "signal",
-      "active": true,
-      "known_restrictions": "Same as r/Fitness.",
+      "active": false,
+      "known_restrictions": "Disabled 9 Nov 2026: returns nothing without REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET. Re-enable once credentials are in .env.",
       "engagement_available": false
     },
     {
@@ -571,8 +571,8 @@
       "collection_interval_hours": 4,
       "reliability": 5,
       "source_role": "signal",
-      "active": true,
-      "known_restrictions": "Same as r/Fitness.",
+      "active": false,
+      "known_restrictions": "Disabled 9 Nov 2026: returns nothing without REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET. Re-enable once credentials are in .env.",
       "engagement_available": false
     },
     {
@@ -585,8 +585,8 @@
       "collection_interval_hours": 4,
       "reliability": 5,
       "source_role": "signal",
-      "active": true,
-      "known_restrictions": "Same as r/Fitness.",
+      "active": false,
+      "known_restrictions": "Disabled 9 Nov 2026: returns nothing without REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET. Re-enable once credentials are in .env.",
       "engagement_available": false
     },
     {
@@ -599,8 +599,8 @@
       "collection_interval_hours": 4,
       "reliability": 4,
       "source_role": "signal",
-      "active": true,
-      "known_restrictions": "Same as r/Fitness. Directly MFO-audience-relevant by age.",
+      "active": false,
+      "known_restrictions": "Disabled 9 Nov 2026: returns nothing without REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET. Re-enable once credentials are in .env.",
       "engagement_available": false
     },
     {
@@ -613,8 +613,8 @@
       "collection_interval_hours": 4,
       "reliability": 4,
       "source_role": "signal",
-      "active": true,
-      "known_restrictions": "Same as r/Fitness. Directly MFO-audience-relevant by age.",
+      "active": false,
+      "known_restrictions": "Disabled 9 Nov 2026: returns nothing without REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET. Re-enable once credentials are in .env.",
       "engagement_available": false
     },
     {
@@ -627,36 +627,36 @@
       "collection_interval_hours": 4,
       "reliability": 4,
       "source_role": "signal",
-      "active": true,
-      "known_restrictions": "Same as r/Fitness.",
+      "active": false,
+      "known_restrictions": "Disabled 9 Nov 2026: returns nothing without REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET. Re-enable once credentials are in .env.",
       "engagement_available": false
     },
     {
       "source_id": "research:pubmed_exercise_trend",
-      "name": "PubMed: exercise trend",
+      "name": "PubMed: training trials and reviews",
       "lane": "research",
       "platform": "pubmed",
-      "canonical_identifier": "(exercise trend[Title/Abstract] OR fitness trend[Title/Abstract])",
+      "canonical_identifier": "(resistance training[Title/Abstract] OR strength training[Title/Abstract] OR high-intensity interval training[Title/Abstract] OR hypertrophy[Title/Abstract]) AND (randomized controlled trial[Publication Type] OR meta-analysis[Publication Type] OR systematic review[Publication Type])",
       "collection_method": "pubmed_esearch_efetch",
       "collection_interval_hours": 24,
       "reliability": 8,
       "source_role": "authority",
       "active": true,
-      "known_restrictions": "Reuses scanner.py's proven pubmed_search/pubmed_fetch/NCBI rate limiting unchanged. Research items are raw signals only in Phase 1 -- never scored or promoted.",
+      "known_restrictions": "Trials, meta-analyses and systematic reviews only (since 9 Nov 2026).",
       "engagement_available": false
     },
     {
       "source_id": "research:pubmed_physical_activity_behavior",
-      "name": "PubMed: physical activity behavior change",
+      "name": "PubMed: exercise and health outcomes",
       "lane": "research",
       "platform": "pubmed",
-      "canonical_identifier": "(physical activity[Title/Abstract] AND (viral[Title/Abstract] OR social media[Title/Abstract] OR trend[Title/Abstract]))",
+      "canonical_identifier": "(exercise[Title/Abstract] OR physical activity[Title/Abstract] OR cardiorespiratory fitness[Title/Abstract] OR grip strength[Title/Abstract]) AND (blood pressure[Title/Abstract] OR mortality[Title/Abstract] OR testosterone[Title/Abstract] OR sleep[Title/Abstract] OR longevity[Title/Abstract]) AND (randomized controlled trial[Publication Type] OR meta-analysis[Publication Type] OR systematic review[Publication Type])",
       "collection_method": "pubmed_esearch_efetch",
       "collection_interval_hours": 24,
       "reliability": 8,
       "source_role": "authority",
       "active": true,
-      "known_restrictions": "Same as above.",
+      "known_restrictions": "Trials, meta-analyses and systematic reviews only (since 9 Nov 2026).",
       "engagement_available": false
     },
     {
@@ -669,6 +669,76 @@
       "collection_interval_hours": 24,
       "reliability": 7,
       "source_role": "authority",
+      "active": true,
+      "known_restrictions": null,
+      "engagement_available": false
+    },
+    {
+      "source_id": "research:pubmed_nutrition_supplements",
+      "name": "PubMed: nutrition and supplements",
+      "lane": "research",
+      "platform": "pubmed",
+      "canonical_identifier": "(creatine[Title/Abstract] OR protein supplementation[Title/Abstract] OR caffeine[Title/Abstract] OR dietary supplement*[Title/Abstract] OR peptide*[Title/Abstract]) AND (exercise[Title/Abstract] OR athletes[Title/Abstract] OR muscle[Title/Abstract]) AND (randomized controlled trial[Publication Type] OR meta-analysis[Publication Type] OR systematic review[Publication Type])",
+      "collection_method": "pubmed_esearch_efetch",
+      "collection_interval_hours": 24,
+      "reliability": 8,
+      "source_role": "authority",
+      "active": true,
+      "known_restrictions": "Trials, meta-analyses and systematic reviews only (since 9 Nov 2026).",
+      "engagement_available": false
+    },
+    {
+      "source_id": "research:sciencedaily_fitness",
+      "name": "ScienceDaily: fitness",
+      "lane": "research",
+      "platform": "rss",
+      "canonical_identifier": "https://www.sciencedaily.com/rss/health_medicine/fitness.xml",
+      "collection_method": "rss_atom",
+      "collection_interval_hours": 12,
+      "reliability": 6,
+      "source_role": "signal",
+      "active": true,
+      "known_restrictions": null,
+      "engagement_available": false
+    },
+    {
+      "source_id": "research:sciencedaily_nutrition",
+      "name": "ScienceDaily: nutrition",
+      "lane": "research",
+      "platform": "rss",
+      "canonical_identifier": "https://www.sciencedaily.com/rss/health_medicine/nutrition.xml",
+      "collection_method": "rss_atom",
+      "collection_interval_hours": 12,
+      "reliability": 6,
+      "source_role": "signal",
+      "active": true,
+      "known_restrictions": null,
+      "engagement_available": false
+    },
+    {
+      "source_id": "research:sciencedaily_sports_medicine",
+      "name": "ScienceDaily: sports medicine",
+      "lane": "research",
+      "platform": "rss",
+      "canonical_identifier": "https://www.sciencedaily.com/rss/health_medicine/sports_medicine.xml",
+      "collection_method": "rss_atom",
+      "collection_interval_hours": 12,
+      "reliability": 6,
+      "source_role": "signal",
+      "active": true,
+      "known_restrictions": null,
+      "engagement_available": false
+    },
+    {
+      "source_id": "publisher:conversation_au_health",
+      "name": "The Conversation AU: health",
+      "lane": "publisher",
+      "platform": "rss",
+      "canonical_identifier": "https://theconversation.com/au/health/articles.atom",
+      "collection_method": "rss_atom",
+      "collection_interval_hours": 6,
+      "reliability": 7,
+      "source_role": "signal",
       "active": true,
       "known_restrictions": null,
       "engagement_available": false

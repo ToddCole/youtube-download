@@ -1,0 +1,12 @@
+{
+  "_notes": "MFO's standing beats. Each query becomes a Google News (Australia) search over the last 7 days, collected every cycle. Edit freely: add a beat, add or remove queries, or set \"active\": false. Kept out of the Claude prompts on purpose -- these widen what gets collected, they don't tell Claude what to pick.",
+  "beats": [
+    {"beat": "physical_100", "name": "Physical 100 and fitness TV", "queries": ["Physical 100", "Physical: Asia Netflix"]},
+    {"beat": "hyrox", "name": "HYROX", "queries": ["HYROX Australia", "HYROX world record"]},
+    {"beat": "masters_games", "name": "Masters Games", "queries": ["Masters Games", "Pan Pacific Masters Games"]},
+    {"beat": "peptides_tga", "name": "Peptides, supplements and the TGA", "queries": ["TGA peptides", "TGA warning supplement", "peptides Australia"]},
+    {"beat": "celebrity_training", "name": "Celebrity and actor training", "queries": ["actor workout role training", "celebrity body transformation training"]},
+    {"beat": "au_sport", "name": "Australian sport and athletes", "queries": ["NRL pre-season training", "AFL pre-season fitness", "strongman Australia", "powerlifting Australia"]},
+    {"beat": "science", "name": "Exercise and nutrition science", "queries": ["strength training study", "exercise study finds", "creatine study"]}
+  ]
+}

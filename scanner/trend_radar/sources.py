@@ -9,11 +9,45 @@ single place a human edits the registry.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 SOURCES_PATH = BASE_DIR / "trend_sources.json"
+BEATS_PATH = BASE_DIR / "beats.json"
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+
+
+def beat_source_configs(path: Path | None = None) -> list[dict]:
+    """beats.json -> one Google News (AU, last 7 days) source per query."""
+    path = path or BEATS_PATH
+    if not path.exists():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    configs = []
+    for beat in data.get("beats", []):
+        active = beat.get("active", True)
+        for query in beat.get("queries", []):
+            configs.append({
+                "source_id": f"beat:{beat['beat']}:{_slug(query)}",
+                "name": f"Beat ({beat.get('name') or beat['beat']}): {query}",
+                "lane": "publisher",
+                "platform": "google-news",
+                "canonical_identifier": f"{query} when:7d",
+                "collection_method": "google_news_rss_search",
+                "collection_interval_hours": 4,
+                "reliability": 5,
+                "source_role": "signal",
+                "active": active,
+                "known_restrictions": "Beat discovery feed (beats.json), not an evidence authority.",
+                "engagement_available": False,
+                "beat": beat["beat"],
+            })
+    return configs
 
 
 def load_source_configs(path: Path | None = None) -> list[dict]:
@@ -21,7 +55,10 @@ def load_source_configs(path: Path | None = None) -> list[dict]:
     if not path.exists():
         return []
     data = json.loads(path.read_text(encoding="utf-8"))
-    return data.get("sources", []) if isinstance(data, dict) else []
+    configs = data.get("sources", []) if isinstance(data, dict) else []
+    if path == SOURCES_PATH:
+        configs = configs + beat_source_configs()
+    return configs
 
 
 def sync_sources(conn: sqlite3.Connection, configs: list[dict]) -> None:

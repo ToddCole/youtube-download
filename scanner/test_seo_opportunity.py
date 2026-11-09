@@ -59,6 +59,12 @@ class VerdictTests(unittest.TestCase):
         self.assertIn("/peptides-australia-legal/", v.reason)
         self.assertNotIn("no MFO page", v.reason)
 
+    def test_real_gsc_footing_explains_an_update_pick_first(self):
+        footing = [{"query": "karl bushby", "page": "https://m/p", "impressions": 593, "position": 2.9}]
+        v = seo.decide(demand(0, None), footing, [], "https://mensfitnessonline.com.au/karl-bushby/")
+        self.assertEqual(v.code, "update_existing")
+        self.assertIn("593 impressions", v.reason)
+
     def test_small_demand_is_watch(self):
         self.assertEqual(seo.decide(demand(20, 0), [], []).code, "watch")
 

@@ -322,11 +322,6 @@ def decide(demand: dict, footing: list[dict], related_pages: list[dict], update_
     au = demand.get("au_volume") or 0
     us = demand.get("us_volume") or 0
     kd = demand.get("best_kd")  # AU difficulty; None when the provider has no score
-    if update_url:
-        # Claude matched this pick to an existing MFO page: never "no MFO page yet".
-        slug = update_url.replace("https://mensfitnessonline.com.au", "")
-        return Verdict("update_existing", "Update existing page",
-                       f"Claude matched this to MFO's {slug} ({au:,}/mo AU searches for '{demand.get('best_keyword')}')")
     if footing:
         top = footing[0]
         pos = top.get("position")
@@ -335,6 +330,11 @@ def decide(demand: dict, footing: list[dict], related_pages: list[dict], update_
             "update_existing", "Update existing page",
             f"MFO already gets {top['impressions']} impressions for '{top['query']}' ({pos_txt}) on {top.get('page') or 'a page'}",
         )
+    if update_url:
+        # Claude matched this pick to an existing MFO page: never "no MFO page yet".
+        slug = update_url.replace("https://mensfitnessonline.com.au", "")
+        return Verdict("update_existing", "Update existing page",
+                       f"Claude matched this to MFO's {slug} ({au:,}/mo AU searches for '{demand.get('best_keyword')}')")
     if related_pages and (au or us):
         return Verdict("update_existing", "Update existing page",
                        f"AU {au:,}/mo, US {us:,}/mo search demand and MFO already has a page on "

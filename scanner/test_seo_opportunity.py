@@ -51,6 +51,14 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(v.code, "write_now")
         self.assertIn("KD unknown", v.reason)
 
+    def test_pick_matched_to_mfo_page_is_update_not_write_now(self):
+        # 9 Nov scan: peptides update said "Write now ... no MFO page".
+        v = seo.decide(demand(2900, None, "are peptides legal in australia"), [], [],
+                       "https://mensfitnessonline.com.au/peptides-australia-legal/")
+        self.assertEqual(v.code, "update_existing")
+        self.assertIn("/peptides-australia-legal/", v.reason)
+        self.assertNotIn("no MFO page", v.reason)
+
     def test_small_demand_is_watch(self):
         self.assertEqual(seo.decide(demand(20, 0), [], []).code, "watch")
 

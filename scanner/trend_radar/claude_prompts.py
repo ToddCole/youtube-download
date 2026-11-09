@@ -54,8 +54,11 @@ After the evidence you may also get EDITOR FEEDBACK (what MFO recently published
 reacted to past picks) and OPEN MFO STORIES (MFO pages that promised a follow-up).
 
 The question is not "what is spreading?" but "what is worth MFO's time today?" Judge each candidate on:
-- Freshness: is there a genuinely new development in the last few days? Old news is only worth a pick \
-  with an original angle another outlet hasn't already run -- say what that angle is.
+- Freshness: this is a gate, not a preference. A pick needs a genuinely new development from the last 7 \
+  days, and why_moving_now must name it and its date. Outlets re-covering or recirculating older news, a \
+  study or a report is not a new development, however recent those articles are. Without one, it belongs \
+  in the watchlist unless MFO has an original angle no outlet has run -- state that angle in mfo_angle, \
+  and say plainly that the news itself is old.
 - Fit: MFO's readers are Australian men who train. An Australian person, event, regulator or study \
   outranks an equivalent overseas one; for overseas stories, say why an Australian reader cares.
 - Evidence: several independent sources, or one authoritative source (a regulator, a peer-reviewed \

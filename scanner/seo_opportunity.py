@@ -318,10 +318,15 @@ class Verdict:
     reason: str
 
 
-def decide(demand: dict, footing: list[dict], related_pages: list[dict]) -> Verdict:
+def decide(demand: dict, footing: list[dict], related_pages: list[dict], update_url: str | None = None) -> Verdict:
     au = demand.get("au_volume") or 0
     us = demand.get("us_volume") or 0
     kd = demand.get("best_kd")  # AU difficulty; None when the provider has no score
+    if update_url:
+        # Claude matched this pick to an existing MFO page: never "no MFO page yet".
+        slug = update_url.replace("https://mensfitnessonline.com.au", "")
+        return Verdict("update_existing", "Update existing page",
+                       f"Claude matched this to MFO's {slug} ({au:,}/mo AU searches for '{demand.get('best_keyword')}')")
     if footing:
         top = footing[0]
         pos = top.get("position")
@@ -419,7 +424,8 @@ def score_latest_scan(client: OpenSEOClient, ledger: CreditLedger, db_path: Path
         footing = gsc_matches(queries, rows)[:5]
         demand_queries = [k["keyword"] for k in demand["keywords"] if k["volume"] > 0]
         pages = keyword_pages(demand_queries, mfo_pages)
-        verdict = decide(demand, footing, pages) if queries else Verdict(
+        update_url = candidate.get("update_url") if candidate.get("story_type") == "update" else None
+        verdict = decide(demand, footing, pages, update_url) if queries else Verdict(
             "watch", "Watch", "No search queries proposed for this pick (scan predates SEO scoring)")
         score = {
             "verdict": verdict.code, "label": verdict.label, "reason": verdict.reason,

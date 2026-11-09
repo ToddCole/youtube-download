@@ -1,8 +1,10 @@
-"""Phone digest after each Claude scan: top picks with their SEO verdicts.
+"""Phone digest after each Claude scan: one notification per pick.
 
-Sent by run_cycle.py once per new scan (07:05 = morning picks, 16:05 =
-afternoon picks). Push priority goes up when a pick is a strong Write now
-(real demand, low KD), so that one actually buzzes.
+Each pick says why now, the MFO angle and its SEO verdict; tapping it
+opens the story's source (or the MFO page, for an update), with Source,
+👍 and 👎 buttons. Sent by run_cycle.py once per new scan (07:05 =
+morning, 16:05 = afternoon). The first pick buzzes (priority 4 when it's
+a strong Write now); the rest arrive quietly.
 
 Manual:  python3 digest.py [--dry-run] [--force]
 """
@@ -20,16 +22,9 @@ import settings  # noqa: F401  (loads .env)
 SCANNER_DIR = Path(__file__).resolve().parent
 TREND_DB = SCANNER_DIR / "trend_radar.db"
 STATE_FILE = SCANNER_DIR / "digest_state.json"
-TOP_N = 3
 # A Write now with this many AU searches a month earns a high-priority push.
 STRONG_WRITE_NOW_VOLUME = 500
 VERDICT_MARK = {"write_now": "🟢", "update_existing": "🔵", "watch": "🟠", "us_only": "🟡", "skip": "⚪"}
-
-
-def _short(headline: str, limit: int = 48) -> str:
-    """Lock-screen banners show ~4 lines: keep each pick to one."""
-    text = (headline or "").split(":")[0].strip()
-    return text if len(text) <= limit else text[: limit - 1].rsplit(" ", 1)[0] + "…"
 
 
 def _k(n: int) -> str:
@@ -55,79 +50,120 @@ def _volume_line(seo: dict | None) -> str:
     return f"AU {_k(vol)}/mo{kd_txt}"
 
 
-def build_digest(scan: dict, scores: dict[int, dict], emerging: dict | None, now: datetime | None = None) -> dict:
-    now = now or datetime.now()
-    slot = "Morning" if now.hour < 12 else "Afternoon"
-    picks = sorted(scan.get("candidates") or [], key=lambda c: c.get("rank") or 99)
-    order = {"write_now": 0, "update_existing": 1, "watch": 2, "us_only": 3, "skip": 4}
-    # Lead with the best SEO bets (biggest Write now first), then Claude's rank.
+VERDICT_LABEL = {"write_now": "Write now", "update_existing": "Update existing page", "watch": "Watch",
+                 "us_only": "US demand only", "skip": "Low SEO upside"}
+ORDER = {"write_now": 0, "update_existing": 1, "watch": 2, "us_only": 3, "skip": 4}
+
+
+def _clip(text: str | None, limit: int) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[: limit - 1].rsplit(" ", 1)[0] + "…"
+
+
+def _sorted_picks(scan: dict, scores: dict[int, dict]) -> list[dict]:
+    """Best SEO bets first (biggest Write now first), then Claude's rank."""
     def key(c):
         seo = scores.get(c.get("rank")) or {}
         volume = (seo.get("demand") or {}).get("au_volume") or 0
-        return (order.get(seo.get("verdict"), 5), -volume if seo.get("verdict") == "write_now" else 0, c.get("rank") or 99)
+        return (ORDER.get(seo.get("verdict"), 5), -volume if seo.get("verdict") == "write_now" else 0, c.get("rank") or 99)
 
-    picks.sort(key=key)
+    return sorted(scan.get("candidates") or [], key=key)
 
+
+def _source_url(candidate: dict) -> str | None:
+    for item in candidate.get("evidence") or []:
+        if item.get("url"):
+            return item["url"]
+    return None
+
+
+def _is_strong(seo: dict | None) -> bool:
+    return bool(seo) and seo.get("verdict") == "write_now" and \
+        ((seo.get("demand") or {}).get("au_volume") or 0) >= STRONG_WRITE_NOW_VOLUME
+
+
+def pick_message(candidate: dict, seo: dict | None, n: int, total: int, slot: str, scan_id) -> dict:
+    """One notification per pick: tap opens the story (or the MFO page to
+    update); buttons open the source and vote 👍 / 👎."""
+    update_url = candidate.get("update_url") if candidate.get("story_type") == "update" else None
+    source = _source_url(candidate)
+    verdict = (seo or {}).get("verdict")
     lines = []
-    ranks, names = [], []
-    for n, c in enumerate(picks[:TOP_N], 1):
-        seo = scores.get(c.get("rank"))
-        mark = VERDICT_MARK.get((seo or {}).get("verdict"), "•")
-        lines.append(f"{mark} {n}. {_short(c.get('headline', ''))} · {_volume_line(seo)}")
-        ranks.append(c.get("rank"))
-        names.append(_short(c.get("headline", "")))
-
-    write_now = [r for r, s in scores.items() if s.get("verdict") == "write_now"]
-    strong = [
-        r for r in write_now
-        if ((scores[r].get("demand") or {}).get("au_volume") or 0) >= STRONG_WRITE_NOW_VOLUME
-    ]
-    rows = (emerging or {}).get("rows") or []
-    if rows:
-        top = rows[0]
-        lines.append(f"📈 '{top.get('query')}' {_k(top.get('impressions_7d') or 0)} impr, new")
-
-    extra = len(picks) - TOP_N
-    if extra > 0:
-        lines.append(f"+{extra} more on the Desk")
-    title = f"MFO {slot} picks: {len(write_now)} Write now" if scores else f"MFO {slot} picks"
+    if update_url:
+        lines.append(f"🔵 Update MFO page: {update_url.replace('https://mensfitnessonline.com.au', '')}")
+    if seo:
+        lines.append(f"{VERDICT_MARK.get(verdict, '•')} {VERDICT_LABEL.get(verdict, seo.get('label') or '')} · {_volume_line(seo)}")
+    lines.append(f"Now: {_clip(candidate.get('why_moving_now'), 260)}")
+    lines.append(f"Angle: {_clip(candidate.get('mfo_angle'), 260)}")
+    checks = (candidate.get("verification_needed") or []) + (candidate.get("editorial_cautions") or [])
+    if checks:
+        lines.append(f"Check: {_clip(checks[0], 160)}")
+    actions = []
+    if source:
+        actions.append({"action": "view", "label": "Source", "url": source, "clear": False})
+    actions += vote_actions(scan_id, candidate.get("rank"), _clip(candidate.get("headline"), 60))
     return {
-        "scan_id": scan.get("_scan_id"),
-        "title": title,
-        "body": "\n".join(lines) or "No picks this scan.",
-        "priority": "high" if strong else "default",
-        # Digest position n -> Claude rank, for the 👍 buttons.
-        "ranks": ranks,
-        "headlines": names,
+        "title": f"{slot} {n}/{total}: {_clip(candidate.get('headline'), 90)}",
+        "message": "\n".join(lines),
+        "priority": 4 if (n == 1 and _is_strong(seo)) else (3 if n == 1 else 2),
+        "tags": ["newspaper"],
+        "click": update_url or source,
+        "actions": actions,
     }
 
 
-def vote_actions(scan_id: int, ranks: list[int], headlines: list[str] | None = None) -> list[dict]:
-    """ntfy allows 3 buttons: one 👍 per pick. A tap posts a visible
-    "✅ Saved" confirmation into the main topic (so Todd sees it worked);
+def build_messages(scan: dict, scores: dict[int, dict], emerging: dict | None, now: datetime | None = None) -> list[dict]:
+    now = now or datetime.now()
+    slot = "Morning" if now.hour < 12 else "Afternoon"
+    picks = _sorted_picks(scan, scores)
+    scan_id = scan.get("_scan_id")
+    if picks:
+        messages = [pick_message(c, scores.get(c.get("rank")), n, len(picks), slot, scan_id)
+                    for n, c in enumerate(picks, 1)]
+    else:
+        messages = [{
+            "title": f"MFO {slot}: nothing strong today",
+            "message": _clip(scan.get("corpus_summary") or "No pick cleared the bar this scan.", 400),
+            "priority": 2, "tags": ["zzz"], "actions": [],
+        }]
+    rows = (emerging or {}).get("rows") or []
+    if rows:
+        top = rows[0]
+        messages.append({
+            "title": f"📈 New in Google: '{top.get('query')}'",
+            "message": f"{_k(top.get('impressions_7d') or 0)} impressions this week, almost none before. Feed it: update or expand the page.",
+            "priority": 2, "tags": ["chart_with_upwards_trend"], "click": top.get("page"), "actions": [],
+        })
+    for m in messages:
+        if not m.get("click"):
+            m.pop("click", None)
+    return messages
+
+
+def vote_actions(scan_id, rank, name: str | None = None) -> list[dict]:
+    """👍 / 👎 buttons. A tap posts a quiet "Saved" note into the main topic;
     the vote rides in its tag, which learning.py polls every cycle."""
     import os
 
     from learning import ntfy_server, vote_tag
 
     topic = os.environ.get("NTFY_TOPIC")
-    if not topic or scan_id is None:
+    if not topic or scan_id is None or rank is None:
         return []
-    headlines = headlines or []
     actions = []
-    for n, rank in enumerate(ranks[:3], 1):
-        name = headlines[n - 1] if n - 1 < len(headlines) else f"pick {n}"
+    for vote, label, title in (("up", "👍", "more like this"), ("down", "👎", "less like this")):
         actions.append({
-            "action": "http", "label": f"👍 {n}", "url": f"{ntfy_server()}/{topic}", "method": "POST",
-            "headers": {"Title": f"Saved: more like #{n}", "Tags": f"white_check_mark,{vote_tag('up', scan_id, rank)}",
-                        "Priority": "2"},
-            "body": f"👍 {name}", "clear": True,
+            "action": "http", "label": label, "url": f"{ntfy_server()}/{topic}", "method": "POST",
+            "headers": {"Title": f"Saved: {title}", "Tags": f"white_check_mark,{vote_tag(vote, scan_id, rank)}",
+                        "Priority": "1"},
+            "body": f"{label} {name or ''}".strip(), "clear": True,
         })
     return actions
 
 
-def publish(digest: dict) -> bool:
-    """JSON publish (headers can't carry emoji labels)."""
+def publish(messages: list[dict]) -> int:
+    """JSON publish, one request per notification (headers can't carry
+    emoji). Returns how many were sent."""
     import os
     import ssl
     from urllib.request import Request, urlopen
@@ -138,20 +174,19 @@ def publish(digest: dict) -> bool:
 
     topic = os.environ.get("NTFY_TOPIC")
     if not topic:
-        return False
-    payload = {
-        "topic": topic, "title": digest["title"], "message": digest["body"],
-        "priority": {"high": 4, "default": 3}.get(digest["priority"], 3), "tags": ["newspaper"],
-        "actions": vote_actions(digest.get("scan_id"), digest.get("ranks") or [], digest.get("headlines")),
-    }
-    request = Request(ntfy_server(), data=json.dumps(payload).encode("utf-8"), method="POST",
-                      headers={"Content-Type": "application/json", "User-Agent": "mfo-editorial-desk/1.0"})
-    try:
-        with urlopen(request, timeout=15, context=ssl.create_default_context(cafile=certifi.where())):
-            return True
-    except Exception as exc:  # noqa: BLE001
-        print(f"WARNING: digest push failed: {exc}", file=sys.stderr)
-        return False
+        return 0
+    context = ssl.create_default_context(cafile=certifi.where())
+    sent = 0
+    for message in messages:
+        payload = {"topic": topic, **message}
+        request = Request(ntfy_server(), data=json.dumps(payload).encode("utf-8"), method="POST",
+                          headers={"Content-Type": "application/json", "User-Agent": "mfo-editorial-desk/1.0"})
+        try:
+            with urlopen(request, timeout=15, context=context):
+                sent += 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"WARNING: digest push failed ({message.get('title')}): {exc}", file=sys.stderr)
+    return sent
 
 
 def _already_sent(scan_id) -> bool:
@@ -174,13 +209,18 @@ def send_digest(force: bool = False, dry_run: bool = False, db_path: Path = TREN
         return "no scan"
     if not force and not dry_run and _already_sent(scan.get("_scan_id")):
         return "already sent"
-    digest = build_digest(scan, load_scores(scan["_scan_id"], db_path), load_emerging(db_path))
+    messages = build_messages(scan, load_scores(scan["_scan_id"], db_path), load_emerging(db_path))
     if dry_run:
-        return f"[{digest['priority']}] {digest['title']}\n{digest['body']}"
-    if publish(digest):
-        _mark_sent(digest["scan_id"])
-        return "sent"
-    return "not sent"
+        return "\n\n".join(
+            f"[p{m['priority']}] {m['title']}\n{m['message']}\n  tap -> {m.get('click', '-')}\n"
+            f"  buttons: {', '.join(a['label'] for a in m.get('actions') or []) or '-'}"
+            for m in messages
+        )
+    sent = publish(messages)
+    if sent:
+        # Even a partial send counts: re-sending would duplicate what arrived.
+        _mark_sent(scan.get("_scan_id"))
+    return "sent" if sent == len(messages) else (f"partly sent ({sent}/{len(messages)})" if sent else "not sent")
 
 
 def main() -> int:
@@ -190,7 +230,7 @@ def main() -> int:
     args = parser.parse_args()
     result = send_digest(force=args.force, dry_run=args.dry_run)
     print(result)
-    return 0 if result in {"sent", "already sent"} or args.dry_run else 1
+    return 0 if result in {"sent", "already sent"} or result.startswith("partly") or args.dry_run else 1
 
 
 if __name__ == "__main__":

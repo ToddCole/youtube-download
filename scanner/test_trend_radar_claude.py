@@ -459,8 +459,9 @@ class EndToEndMockedScanTests(ClaudeTestCase):
         fake_client.messages.stream.return_value = stream_cm
         return fake_client
 
-    def _run(self, conn, fake_client, **kwargs):
-        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), \
+    def _run(self, conn, fake_client, research=False, **kwargs):
+        env = {"ANTHROPIC_API_KEY": "test-key", "MFO_WEB_RESEARCH": "1" if research else "0"}
+        with mock.patch.dict(os.environ, env), \
              mock.patch("trend_radar.claude_scan.build_client", return_value=fake_client):
             from trend_radar.claude_scan import run_claude_scan
 
@@ -470,6 +471,75 @@ class EndToEndMockedScanTests(ClaudeTestCase):
         return Candidate(rank=rank, headline=f"h{rank}", topic_summary="s", why_moving_now="w", mfo_angle="a",
                          confidence="low", evidence_strength="weak", lanes=["publisher"], independent_sources=1,
                          evidence=[EvidenceItem(signal_id=i, relevance="core") for i in ids])
+
+    def _fake_research_response(self, notes="## w: A\n- Confirmed: it happened (https://example.org/primary, 2026-11-05)",
+                                searches=3, stop_reason="end_turn"):
+        response = mock.Mock()
+        text = mock.Mock(type="text")
+        text.text = notes
+        result = mock.Mock(type="web_search_tool_result")
+        result.content = [mock.Mock(url="https://example.org/primary", title="Primary", page_age="2 days"),
+                          mock.Mock(url="https://example.org/other", title="Other", page_age=None)]
+        response.content = [mock.Mock(type="server_tool_use"), result, text]
+        response.stop_reason = stop_reason
+        response.usage = mock.Mock(input_tokens=100, output_tokens=50, cache_read_input_tokens=0,
+                                   cache_creation_input_tokens=0,
+                                   server_tool_use=mock.Mock(web_search_requests=searches))
+        return response
+
+    def test_web_research_notes_reach_editorial_and_searches_are_costed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = self.connect(Path(tmp) / "t.db")
+            self.seed_source_and_run(conn)
+            self.add_signal(conn, url="https://example.com/one", title="Story one")
+            discovery = DiscoveryOutput(waves=[DiscoveryWave(wave_id="w", working_label="A", signal_ids=["S001"], cross_source_reasoning="x")])
+            editorial = ClaudeScanOutput(corpus_summary="c", candidates=[self._cand(1, ["S001"])])
+            client = self._client_returning(self._fake_parsed_response(discovery), self._fake_research_response(),
+                                            self._fake_parsed_response(editorial))
+            result = self._run(conn, client, research=True)
+            calls = client.messages.stream.call_args_list
+            self.assertEqual(len(calls), 3)
+            self.assertEqual(calls[1].kwargs["tools"][0]["type"], "web_search_20260209")
+            self.assertEqual(calls[1].kwargs["tools"][0]["max_uses"], 8)
+            self.assertNotIn("output_config", calls[1].kwargs)  # web search never shares a structured-output call
+            self.assertIn("WEB RESEARCH NOTES", calls[2].kwargs["messages"][0]["content"])
+            self.assertIn("https://example.org/primary", calls[2].kwargs["messages"][0]["content"])
+            self.assertEqual(result["_web_research"]["searches"], 3)
+            self.assertEqual(len(result["_web_research"]["sources"]), 2)
+            self.assertEqual(result["usage"]["web_search_requests"], 3)
+            self.assertGreaterEqual(result["usage"]["cost_usd"], 0.03)
+
+    def test_paused_research_turn_is_resumed_without_a_new_user_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = self.connect(Path(tmp) / "t.db")
+            self.seed_source_and_run(conn)
+            self.add_signal(conn, url="https://example.com/one", title="Story one")
+            discovery = DiscoveryOutput(waves=[DiscoveryWave(wave_id="w", working_label="A", signal_ids=["S001"], cross_source_reasoning="x")])
+            editorial = ClaudeScanOutput(corpus_summary="c", candidates=[self._cand(1, ["S001"])])
+            client = self._client_returning(self._fake_parsed_response(discovery),
+                                            self._fake_research_response(notes="part one ", searches=2, stop_reason="pause_turn"),
+                                            self._fake_research_response(notes="part two", searches=1),
+                                            self._fake_parsed_response(editorial))
+            result = self._run(conn, client, research=True)
+            resumed = client.messages.stream.call_args_list[2].kwargs["messages"]
+            self.assertEqual([m["role"] for m in resumed], ["user", "assistant"])
+            self.assertEqual(result["_web_research"]["searches"], 3)
+            self.assertIn("part two", result["_web_research"]["notes"])
+
+    def test_failed_web_research_does_not_stop_the_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = self.connect(Path(tmp) / "t.db")
+            self.seed_source_and_run(conn)
+            self.add_signal(conn, url="https://example.com/one", title="Story one")
+            discovery = DiscoveryOutput(waves=[DiscoveryWave(wave_id="w", working_label="A", signal_ids=["S001"], cross_source_reasoning="x")])
+            editorial = ClaudeScanOutput(corpus_summary="c", candidates=[self._cand(1, ["S001"])])
+            client = self._client_returning(self._fake_parsed_response(discovery), RuntimeError("search unavailable"),
+                                            self._fake_parsed_response(editorial))
+            result = self._run(conn, client, research=True)
+            self.assertEqual(len(result["candidates"]), 1)
+            self.assertIn("search unavailable", result["_web_research"]["error"])
+            self.assertTrue(any("web research skipped" in r for r in result["_validation_repairs"]))
+            self.assertNotIn("WEB RESEARCH NOTES", client.messages.stream.call_args_list[-1].kwargs["messages"][0]["content"])
 
     def test_short_refs_are_sent_and_mapped_back_with_repairs_logged(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -604,7 +674,7 @@ class EndToEndMockedScanTests(ClaudeTestCase):
                 self._fake_parsed_response(editorial_output),
             )
 
-            with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}), \
+            with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key", "MFO_WEB_RESEARCH": "0"}), \
                  mock.patch("trend_radar.claude_scan.build_client", return_value=fake_client):
                 from trend_radar.claude_scan import run_claude_scan
 

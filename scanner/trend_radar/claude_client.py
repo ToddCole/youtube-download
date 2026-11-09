@@ -41,6 +41,11 @@ PRICES_PER_MTOK: dict[str, tuple[float, float, float, float]] = {
     "claude-haiku-5-5": (0.10, 0.50, 0.01, 0.125),
 }
 FALLBACK_PRICE = (4.00, 20.00, 0.40, 5.00)  # deliberately pessimistic for unknown models
+# Web search server tool: US$10 per 1,000 searches, on top of tokens.
+WEB_SEARCH_USD = 0.01
+# Search results come back as input tokens; budget this many per search
+# when estimating a research call's worst case for the spend cap.
+EST_TOKENS_PER_SEARCH = 25_000
 
 
 def _int(value) -> int:
@@ -64,6 +69,7 @@ class UsageTotals:
     output_tokens: int = 0
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
+    web_search_requests: int = 0
     elapsed_seconds: float = 0.0
 
     def record(self, usage, elapsed: float) -> float:
@@ -74,6 +80,7 @@ class UsageTotals:
         self.output_tokens += int(usage.output_tokens)
         self.cache_read_input_tokens += _int(getattr(usage, "cache_read_input_tokens", 0))
         self.cache_creation_input_tokens += _int(getattr(usage, "cache_creation_input_tokens", 0))
+        self.web_search_requests += _int(getattr(getattr(usage, "server_tool_use", None), "web_search_requests", 0))
         self.elapsed_seconds += elapsed
         return self.cost_usd - before
 
@@ -85,7 +92,7 @@ class UsageTotals:
             + self.output_tokens * p_out
             + self.cache_read_input_tokens * p_cr
             + self.cache_creation_input_tokens * p_cw
-        ) / 1_000_000
+        ) / 1_000_000 + self.web_search_requests * WEB_SEARCH_USD
 
     def as_dict(self) -> dict:
         return {
@@ -95,6 +102,7 @@ class UsageTotals:
             "output_tokens": self.output_tokens,
             "cache_read_input_tokens": self.cache_read_input_tokens,
             "cache_creation_input_tokens": self.cache_creation_input_tokens,
+            "web_search_requests": self.web_search_requests,
             "elapsed_seconds": round(self.elapsed_seconds, 3),
             "cost_usd": round(self.cost_usd, 4),
         }
@@ -246,3 +254,68 @@ def call_structured(
         return output_format.model_validate_json(text)
     except ValidationError as exc:
         raise ClaudeOutputError(f"response did not match the {output_format.__name__} schema: {exc.errors()[:3]}") from exc
+
+
+AU_LOCATION = {"type": "approximate", "country": "AU", "city": "Sydney", "region": "New South Wales",
+               "timezone": "Australia/Sydney"}
+MAX_PAUSE_RESUMES = 3
+
+
+def call_web_research(
+    client: anthropic.Anthropic,
+    *,
+    model: str,
+    system: str,
+    user_content: str,
+    max_tokens: int,
+    max_searches: int,
+    usage: UsageTotals,
+    ledger: SpendLedger | None = None,
+) -> tuple[str, list[dict]]:
+    """One plain-text call with the web search server tool (capped at
+    max_searches, searches localised to Australia). Returns the model's
+    notes and every result URL it saw. Kept separate from
+    call_structured so structured output and web search never share a
+    request.
+
+    A long server-side search loop can stop with stop_reason "pause_turn";
+    the paused assistant turn is sent back unchanged (no extra user
+    message) so the server resumes it, at most MAX_PAUSE_RESUMES times.
+    """
+    if ledger is not None:
+        p_in, _p_out, _cr, _cw = price_for(model)
+        search_worst = max_searches * (WEB_SEARCH_USD + EST_TOKENS_PER_SEARCH * p_in / 1_000_000)
+        ledger.check(estimate_call_cost(model, system, user_content, max_tokens) + search_worst)
+
+    tools = [{"type": "web_search_20260209", "name": "web_search", "max_uses": max_searches,
+              "user_location": AU_LOCATION}]
+    messages: list[dict] = [{"role": "user", "content": user_content}]
+    blocks: list = []
+    for _attempt in range(MAX_PAUSE_RESUMES + 1):
+        started = time.monotonic()
+        with client.messages.stream(model=model, max_tokens=max_tokens, system=system,
+                                    messages=messages, tools=tools) as stream:
+            final = stream.get_final_message()
+        cost = usage.record(final.usage, time.monotonic() - started)
+        if ledger is not None:
+            ledger.add(cost)
+        blocks.extend(final.content)
+        stop_reason = getattr(final, "stop_reason", None)
+        if stop_reason != "pause_turn":
+            break
+        messages = messages + [{"role": "assistant", "content": final.content}]
+    if stop_reason == "refusal":
+        raise ClaudeOutputError("model refused the research request")
+
+    text = "".join(b.text for b in blocks if getattr(b, "type", None) == "text").strip()
+    sources: dict[str, dict] = {}
+    for b in blocks:
+        if getattr(b, "type", None) == "web_search_tool_result" and isinstance(getattr(b, "content", None), list):
+            for r in b.content:
+                url = getattr(r, "url", None)
+                if url and url not in sources:
+                    sources[url] = {"url": url, "title": getattr(r, "title", None),
+                                    "page_age": getattr(r, "page_age", None)}
+    if stop_reason == "max_tokens":
+        text += "\n\n[research notes truncated]"
+    return text, list(sources.values())

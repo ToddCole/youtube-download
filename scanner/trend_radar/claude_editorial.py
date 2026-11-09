@@ -72,6 +72,28 @@ def build_editorial_user_content(
     )
 
 
+def build_research_user_content(
+    discovery: DiscoveryOutput,
+    evidence_by_id: dict[str, EvidenceRecord],
+    expansion_results: dict[str, list[EvidenceRecord]],
+    max_items_per_wave: int = 8,
+) -> str:
+    """Compact view of each discovery wave for the web research step:
+    label, reasoning and the headlines/sources/dates behind it."""
+    lines = ["Candidate stories from today's discovery pass:", ""]
+    for wave in discovery.waves:
+        records = [evidence_by_id[sid] for sid in wave.signal_ids if sid in evidence_by_id]
+        records += expansion_results.get(wave.wave_id, [])
+        lines.append(f"### {wave.wave_id}: {wave.working_label}")
+        lines.append(f"Evidence reasoning: {wave.cross_source_reasoning}")
+        if wave.ambiguous_name_caution:
+            lines.append(f"Ambiguity caution: {wave.ambiguous_name_caution}")
+        for r in records[:max_items_per_wave]:
+            lines.append(f"- {r.title} ({r.source}, {(r.published_at or '')[:10]})")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def repair_final_output(output: ClaudeScanOutput, known_signal_ids: set[str]) -> list[str]:
     """Visible, logged repair: drops evidence items citing ids that were not
     supplied, drops candidates left with no evidence, and renumbers ranks

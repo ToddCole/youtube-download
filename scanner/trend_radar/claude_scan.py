@@ -1,6 +1,7 @@
 """Orchestrates the full two-pass Claude-powered scan: build evidence
 packet -> Pass A discovery -> validate -> controlled expansion ->
-Pass B editorial judgement -> validate -> assemble final result.
+web research (web search, plain-text notes) -> Pass B editorial
+judgement -> validate -> assemble final result.
 
 No network/API call happens anywhere at import time -- build_client()
 and every collector/search function are only ever invoked inside
@@ -9,22 +10,32 @@ run_claude_scan() itself.
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import sys
 from datetime import datetime, timezone
 
-from .claude_client import SpendLedger, UsageTotals, build_client, call_structured, resolve_model
+from .claude_client import (
+    SpendLedger,
+    UsageTotals,
+    build_client,
+    call_structured,
+    call_web_research,
+    resolve_model,
+)
 from .claude_discovery import build_discovery_user_content, repair_discovery_output, validate_discovery_output
 from .claude_editorial import (
     MAX_CANDIDATES,
     MIN_CANDIDATES,
     EditorialValidationError,
     build_editorial_user_content,
+    build_research_user_content,
     repair_final_output,
     validate_final_output,
 )
 from .claude_evidence import EvidenceRecord, build_evidence_packet
 from .claude_expansion import run_expansion
-from .claude_prompts import DISCOVERY_SYSTEM_PROMPT, EDITORIAL_SYSTEM_PROMPT
+from .claude_prompts import DISCOVERY_SYSTEM_PROMPT, EDITORIAL_SYSTEM_PROMPT, RESEARCH_SYSTEM_PROMPT
 from .claude_schemas import ClaudeScanOutput, DiscoveryOutput
 
 DEFAULT_LOOKBACK_DAYS = 7
@@ -32,6 +43,18 @@ DEFAULT_MAX_SIGNALS = 400
 # Streaming, so these can be generous; thinking shares the budget.
 DISCOVERY_MAX_TOKENS = 32000
 EDITORIAL_MAX_TOKENS = 32000
+RESEARCH_MAX_TOKENS = 16000
+# Web research before the editorial pass: on unless MFO_WEB_RESEARCH=0.
+DEFAULT_MAX_SEARCHES = 8
+
+
+def web_research_settings() -> tuple[bool, int]:
+    enabled = os.environ.get("MFO_WEB_RESEARCH", "1") != "0"
+    try:
+        searches = int(os.environ.get("MFO_WEB_SEARCH_MAX", DEFAULT_MAX_SEARCHES))
+    except ValueError:
+        searches = DEFAULT_MAX_SEARCHES
+    return enabled and searches > 0, max(0, searches)
 
 
 def build_packet_report(evidence: list[EvidenceRecord]) -> dict:
@@ -125,7 +148,31 @@ def run_claude_scan(
     shown_ids = {sid for wave in discovery.waves for sid in wave.signal_ids}
     shown_ids |= {r.signal_id for records in expansion_results.values() for r in records}
 
-    user_content = build_editorial_user_content(discovery, evidence_by_id, expansion_results, refs) + feedback_suffix
+    research: dict = {"enabled": False}
+    research_enabled, max_searches = web_research_settings()
+    if research_enabled and discovery.waves:
+        research = {"enabled": True, "max_searches": max_searches}
+        searches_before = usage.web_search_requests
+        try:
+            notes, sources = call_web_research(
+                client,
+                model=resolved_model,
+                system=RESEARCH_SYSTEM_PROMPT,
+                user_content=build_research_user_content(discovery, evidence_by_id, expansion_results),
+                max_tokens=RESEARCH_MAX_TOKENS,
+                max_searches=max_searches,
+                usage=usage,
+                ledger=ledger,
+            )
+            research.update({"notes": notes, "sources": sources})
+        except Exception as exc:  # noqa: BLE001 -- research is an aid; the scan goes on without it
+            research["error"] = f"{exc.__class__.__name__}: {exc}"
+            repairs.append(f"web research skipped: {research['error']}")
+            print(f"WARNING: web research failed: {research['error']}", file=sys.stderr)
+        research["searches"] = usage.web_search_requests - searches_before
+    notes_suffix = f"\n\nWEB RESEARCH NOTES\n\n{research['notes']}" if research.get("notes") else ""
+
+    user_content = build_editorial_user_content(discovery, evidence_by_id, expansion_results, refs) + notes_suffix + feedback_suffix
     editorial: ClaudeScanOutput | None = None
     last_error: Exception | None = None
     for attempt in (1, 2):
@@ -171,6 +218,7 @@ def run_claude_scan(
     result["_evidence_packet_size"] = len(evidence)
     result["_evidence_packet_truncated"] = truncated
     result["_editor_feedback_used"] = bool(editor_feedback)
+    result["_web_research"] = research
     result["_discovery_waves"] = [
         {
             "wave_id": w.wave_id,

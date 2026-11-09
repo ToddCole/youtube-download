@@ -2,6 +2,9 @@
 
 Last updated 9 Nov 2026. Branch: `feature/mfo-trend-radar-claude`.
 
+**Status: stood down for handover, 9 Nov 2026.** No work is in progress on this
+machine. The scheduled scans keep running. Next step is the checks below.
+
 ## Where it stands
 
 The five-phase scanner upgrade and the phone digest are built and pushed.

@@ -81,6 +81,13 @@ the watchlist for items worth holding -- promising but too early, too narrow, or
 angle -- with one line each on why you're holding it. Use rejected_or_merged_topics for brief notes on \
 what you rejected or merged and why.
 
+Separately, return up to three evergreen_angles: items you held for freshness where MFO could still \
+publish something lasting -- an explainer, a practical guide, a myth-check -- that doesn't depend on \
+the news being new (e.g. "what the new law actually covers", "how to read a supplement label"). Only \
+from waves you were given, with the same evidence standards; never an angle that would overreach the \
+source. Prefer expanding an existing MFO page (update_url, given to you) over a new piece. These are \
+not picks and do not count toward the 0-6.
+
 For every candidate, state:
 - What the story actually is, in plain terms, and whether it's a new story or an update (with the MFO URL).
 - Why now: the specific new development and its date.

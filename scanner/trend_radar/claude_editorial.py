@@ -119,6 +119,11 @@ def repair_final_output(output: ClaudeScanOutput, known_signal_ids: set[str]) ->
     for index, candidate in enumerate(kept, start=1):
         candidate.rank = index
     output.candidates = kept
+    for angle in output.evergreen_angles:
+        if angle.update_url and not angle.update_url.startswith(MFO_URL_PREFIX):
+            notes.append(f"evergreen {angle.topic[:60]!r}: dropped non-MFO update_url {angle.update_url!r}")
+            angle.update_url = None
+    output.evergreen_angles = output.evergreen_angles[:3]
     return notes
 
 

@@ -521,6 +521,16 @@ def main() -> int:
         if not args.no_emerging:
             rows = emerging_demand(client)
             print(f"Emerging demand: {len(rows)} new quer(ies)")
+        try:
+            import evergreen
+            from editorial_today import latest_trend_scan
+
+            scan = latest_trend_scan(TREND_DB)
+            if scan:
+                ideas = evergreen.compute(scan, evergreen.striking_rows(client), load_mfo_pages())
+                print(f"Evergreen: {len(ideas)} idea(s) for scan {scan.get('_scan_id')}")
+        except Exception as exc:  # noqa: BLE001  (evergreen is a bonus; never fail the step)
+            print(f"WARNING: evergreen ideas failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
     except OpenSEOError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

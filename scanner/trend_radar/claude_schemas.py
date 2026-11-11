@@ -84,6 +84,16 @@ class Candidate(BaseModel):
     )
 
 
+class EvergreenAngle(BaseModel):
+    topic: str = Field(description="Short working title for the evergreen piece.")
+    angle: str = Field(description="The original, lasting MFO angle: what the piece explains or teaches, not the old news.")
+    why_it_lasts: str = Field(description="One line on why readers will still search for this in months.")
+    update_url: str | None = Field(
+        default=None,
+        description="An existing MFO page to expand instead, exactly as given to you. Never guessed.",
+    )
+
+
 class ClaudeScanOutput(BaseModel):
     """What Claude itself generates in Pass B. Deliberately does NOT
     include generated_at/model/usage -- Claude cannot know its own
@@ -97,3 +107,7 @@ class ClaudeScanOutput(BaseModel):
     candidates: list[Candidate] = Field(description="0 to 6 picks, ranked by what MFO should do first. Never padded: return fewer, or none, when fewer clear the bar.")
     watchlist: list[str] = Field(default_factory=list, description="Items worth holding (too early, too narrow, or needing an original angle), one line each with the reason.")
     rejected_or_merged_topics: list[str] = Field(default_factory=list, description="Short notes on waves that were considered and rejected or merged into a candidate above.")
+    evergreen_angles: list[EvergreenAngle] = Field(
+        default_factory=list,
+        description="0 to 3 held items (old news, no fresh hook) where MFO could still publish a lasting explainer or guide.",
+    )

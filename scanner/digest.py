@@ -4,7 +4,8 @@ Each pick says why now, the MFO angle and its SEO verdict; tapping it
 opens the story's source (or the MFO page, for an update), with Source,
 👍 and 👎 buttons. Sent by run_cycle.py once per new scan (07:05 =
 morning, 16:05 = afternoon). The first pick buzzes (priority 4 when it's
-a strong Write now); the rest arrive quietly.
+a strong Write now); the rest arrive quietly. On a quiet news day,
+🌲 evergreen ideas (evergreen.py) top the digest up to four.
 
 Manual:  python3 digest.py [--dry-run] [--force]
 """
@@ -112,7 +113,36 @@ def pick_message(candidate: dict, seo: dict | None, n: int, total: int, slot: st
     }
 
 
-def build_messages(scan: dict, scores: dict[int, dict], emerging: dict | None, now: datetime | None = None) -> list[dict]:
+def evergreen_message(idea: dict, scan_id) -> dict:
+    """A quiet 🌲 notification: what to refresh or write, and why it pays."""
+    lines = []
+    if idea.get("kind") == "refresh":
+        title = f"🌲 Evergreen: refresh {_clip(idea.get('title'), 70)}"
+        queries = idea.get("queries") or []
+        if queries:
+            q = queries[0]
+            lines.append(f"Google has it at #{q['position']:g} for '{q['query']}' ({_k(q['impressions'])} impressions, 28 days).")
+        if len(queries) > 1:
+            lines.append("Also: " + ", ".join(f"'{q['query']}' #{q['position']:g}" for q in queries[1:]))
+        lines.append("Push it onto page 1: bring it up to date and answer what those searchers want.")
+        if idea.get("rivals"):
+            rivals = idea["rivals"]
+            lines.append(f"Split ranking: {', '.join(rivals)} also rank{'s' if len(rivals) == 1 else ''} for it. Link or merge them.")
+    else:
+        title = f"🌲 Evergreen: {_clip(idea.get('title'), 80)}"
+        if idea.get("url"):
+            lines.append(f"🔵 Expand MFO page: {idea['url'].replace('https://mensfitnessonline.com.au', '')}")
+        lines.append(f"Angle: {_clip(idea.get('angle'), 260)}")
+        if idea.get("why_it_lasts"):
+            lines.append(f"Lasts: {_clip(idea['why_it_lasts'], 160)}")
+    return {
+        "title": title, "message": "\n".join(lines), "priority": 2, "tags": ["evergreen_tree"],
+        "click": idea.get("url"), "actions": vote_actions(scan_id, idea.get("rank"), _clip(idea.get("title"), 60)),
+    }
+
+
+def build_messages(scan: dict, scores: dict[int, dict], emerging: dict | None, now: datetime | None = None,
+                   evergreen: list[dict] | None = None) -> list[dict]:
     now = now or datetime.now()
     slot = "Morning" if now.hour < 12 else "Afternoon"
     picks = _sorted_picks(scan, scores)
@@ -126,6 +156,7 @@ def build_messages(scan: dict, scores: dict[int, dict], emerging: dict | None, n
             "message": _clip(scan.get("corpus_summary") or "No pick cleared the bar this scan.", 400),
             "priority": 2, "tags": ["zzz"], "actions": [],
         }]
+    messages += [evergreen_message(idea, scan_id) for idea in evergreen or []]
     rows = (emerging or {}).get("rows") or []
     if rows:
         top = rows[0]
@@ -209,7 +240,10 @@ def send_digest(force: bool = False, dry_run: bool = False, db_path: Path = TREN
         return "no scan"
     if not force and not dry_run and _already_sent(scan.get("_scan_id")):
         return "already sent"
-    messages = build_messages(scan, load_scores(scan["_scan_id"], db_path), load_emerging(db_path))
+    import evergreen
+
+    messages = build_messages(scan, load_scores(scan["_scan_id"], db_path), load_emerging(db_path),
+                              evergreen=evergreen.load(scan["_scan_id"], db_path))
     if dry_run:
         return "\n\n".join(
             f"[p{m['priority']}] {m['title']}\n{m['message']}\n  tap -> {m.get('click', '-')}\n"

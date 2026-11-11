@@ -96,5 +96,24 @@ class DigestTests(unittest.TestCase):
         self.assertEqual([a["label"] for a in msgs[0]["actions"]], ["Source"])
 
 
+    def test_email_carries_every_pick_with_its_links(self):
+        msgs = self.build({2: score("write_now", 14500, "spanish squat", None)})
+        subject, body = digest.build_email(msgs)
+        self.assertEqual(subject, "MFO Desk: Morning 1/3: Spanish squats (+2 more)")
+        for m in msgs:
+            self.assertIn(m["title"], body)
+        self.assertIn("→ https://news.example/2", body)
+        self.assertIn("→ https://mensfitnessonline.com.au/peptides-australia-legal/", body)
+        self.assertIn("→ https://news.example/3", body)  # source button, besides the update page
+
+    def test_no_channel_means_not_sent(self):
+        scan = {"_scan_id": 9, "candidates": []}
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch("editorial_today.latest_trend_scan", return_value=scan), \
+                mock.patch("seo_opportunity.load_scores", return_value={}), \
+                mock.patch("seo_opportunity.load_emerging", return_value=None):
+            self.assertTrue(digest.send_digest().startswith("not sent"))
+
+
 if __name__ == "__main__":
     unittest.main()

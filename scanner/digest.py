@@ -216,11 +216,45 @@ def send_digest(force: bool = False, dry_run: bool = False, db_path: Path = TREN
             f"  buttons: {', '.join(a['label'] for a in m.get('actions') or []) or '-'}"
             for m in messages
         )
-    sent = publish(messages)
-    if sent:
+    import os
+
+    import mailer
+
+    pushing, emailing = bool(os.environ.get("NTFY_TOPIC")), mailer.configured()
+    if not pushing and not emailing:
+        return "not sent (no NTFY_TOPIC or email configured)"
+    sent = publish(messages) if pushing else 0
+    emailed = mailer.send(*build_email(messages)) if emailing else False
+    if sent or emailed:
         # Even a partial send counts: re-sending would duplicate what arrived.
         _mark_sent(scan.get("_scan_id"))
-    return "sent" if sent == len(messages) else (f"partly sent ({sent}/{len(messages)})" if sent else "not sent")
+    push_ok = not pushing or sent == len(messages)
+    email_ok = not emailing or emailed
+    if push_ok and email_ok:
+        return "sent"
+    if not sent and not emailed:
+        return "not sent"
+    failed = []
+    if not push_ok:
+        failed.append(f"push {sent}/{len(messages)}")
+    if not email_ok:
+        failed.append("email failed")
+    return f"partly sent ({', '.join(failed)})"
+
+
+def build_email(messages: list[dict]) -> tuple[str, str]:
+    """The whole digest as one email: subject from the first pick, then
+    each notification with its links (ntfy vote buttons don't carry over)."""
+    first = messages[0]["title"]
+    subject = f"MFO Desk: {first}" + (f" (+{len(messages) - 1} more)" if len(messages) > 1 else "")
+    blocks = []
+    for m in messages:
+        lines = [m["title"], m["message"]]
+        links = [m["click"]] if m.get("click") else []
+        links += [a["url"] for a in m.get("actions") or [] if a.get("action") == "view" and a["url"] not in links]
+        lines += [f"→ {url}" for url in links]
+        blocks.append("\n".join(lines))
+    return subject, "\n\n" + ("\n\n" + "─" * 40 + "\n\n").join(blocks) + "\n"
 
 
 def main() -> int:

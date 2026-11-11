@@ -5,7 +5,7 @@ hand:  python3 run_cycle.py [--claude|--no-claude] [--no-alert]
 
 Every run is recorded in scanner.db `pipeline_runs` with per-step status,
 so a failure can never again disappear silently. Alerts go to ntfy when
-NTFY_TOPIC is set in .env.
+NTFY_TOPIC is set in .env, and by email when MFO_EMAIL_TO + SMTP_PASSWORD are.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.request import Request, urlopen
 
+import mailer
 import settings  # noqa: F401  (loads .env)
 from cycle_lock import LockBusy, cycle_lock
 
@@ -179,7 +180,7 @@ def run_cycle(with_claude: bool | None, alert: bool) -> int:
                 steps.append(step)
                 if step["status"] == "ok" and os.environ.get("OPENSEO_API_KEY"):
                     steps.append(run_step("seo_score", [py, "seo_opportunity.py"], 600))
-                if step["status"] == "ok" and alert and os.environ.get("NTFY_TOPIC"):
+                if step["status"] == "ok" and alert and (os.environ.get("NTFY_TOPIC") or mailer.configured()):
                     steps.append(run_step("digest", [py, "digest.py"], 60))
     except LockBusy as exc:
         steps.append({"step": "lock", "status": "skipped", "stderr_tail": str(exc)})
@@ -204,6 +205,7 @@ def run_cycle(with_claude: bool | None, alert: bool) -> int:
             "\n".join(problems[:8]),
             priority="high" if status == "failed" else "default",
         )
+        mailer.send(f"MFO Desk: {status}", "\n".join(problems[:8]))
     return 0 if status != "failed" else 1
 
 

@@ -49,6 +49,16 @@ RESEARCH_MAX_TOKENS = 16000
 DEFAULT_MAX_SEARCHES = 8
 
 
+DEFAULT_MAX_FETCHES = 6
+
+
+def web_fetch_max() -> int:
+    try:
+        return max(0, int(os.environ.get("MFO_WEB_FETCH_MAX", DEFAULT_MAX_FETCHES)))
+    except ValueError:
+        return DEFAULT_MAX_FETCHES
+
+
 def web_research_settings() -> tuple[bool, int]:
     enabled = os.environ.get("MFO_WEB_RESEARCH", "1") != "0"
     try:
@@ -150,8 +160,11 @@ def run_claude_scan(
 ) -> dict:
     """editor_feedback: learning.build_feedback() text, appended to both
     passes so discovery and editorial lean toward what the editor uses."""
-    feedback_suffix = f"\n\n{editor_feedback}" if editor_feedback else ""
+    from . import sent_log
     from .claude_fit_food import news_source_filter
+
+    already_sent = sent_log.prompt_block(conn)
+    feedback_suffix = "".join(f"\n\n{b}" for b in (editor_feedback, already_sent) if b)
 
     # The fit-food-only sources feed the fit-food pass, never the news scan's packet.
     evidence = build_evidence_packet(conn, lookback_days=lookback_days, max_signals=max_signals + 1,
@@ -221,8 +234,10 @@ def run_claude_scan(
                 max_searches=max_searches,
                 usage=usage,
                 ledger=ledger,
+                max_fetches=web_fetch_max(),
             )
-            research.update({"notes": notes, "sources": sources})
+            research.update({"notes": notes, "sources": sources,
+                             "fetched": sum(1 for s in sources if s.get("fetched"))})
         except Exception as exc:  # noqa: BLE001 -- research is an aid; the scan goes on without it
             research["error"] = f"{exc.__class__.__name__}: {exc}"
             repairs.append(f"web research skipped: {research['error']}")
@@ -272,7 +287,8 @@ def run_claude_scan(
         from .claude_fit_food import fit_food_packet, run_fit_food
 
         result["fit_food"] = run_fit_food(client, model=resolved_model,
-                                          evidence=fit_food_packet(conn, lookback_days=lookback_days), ledger=ledger)
+                                          evidence=fit_food_packet(conn, lookback_days=lookback_days), ledger=ledger,
+                                          already_sent=already_sent)
     result["generated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     result["model"] = resolved_model
     result["usage"] = usage.as_dict()

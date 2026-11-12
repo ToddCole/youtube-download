@@ -1,8 +1,8 @@
 {
-  "_notes": "Fit-food pass settings (trend_radar/claude_fit_food.py). The brief itself is fit_food_brief.md. signal_keywords pick which collected signals are handed to the pass as a starting point (whole words, plus plural/-ing forms; a trailing * marks a prefix; titles only, except dedicated_sources where the body counts too); mfo_page_keywords pick which MFO pages it may suggest updating. compare runs the same brief as a web-only search, so the two can be compared, until compare_until. Fit food runs once a day, on the first scan of the day. dedicated_sources (plus every beat:fit_food:* search) feed only this pass, so the main news scan's packet is unchanged by them.",
+  "_notes": "Fit-food pass settings (trend_radar/claude_fit_food.py). The brief itself is fit_food_brief.md. signal_keywords pick which collected signals are handed to the pass as a starting point (whole words, plus plural/-ing forms; a trailing * marks a prefix; titles only, except dedicated_sources where the body counts too); mfo_page_keywords pick which MFO pages it may suggest updating. compare runs the same brief as a web-only search, so the two can be compared, until compare_until (off since 13 Nov: the two searches found the same stories). max_fetches lets the research open that many source pages. Fit food runs once a day, on the first scan of the day. dedicated_sources (plus every beat:fit_food:* search) feed only this pass, so the main news scan's packet is unchanged by them.",
   "max_searches": 15,
-  "compare": true,
-  "compare_until": "2026-11-16",
+  "compare": false,
+  "max_fetches": 6,
   "max_packet_signals": 1500,
   "dedicated_sources": [
     "food:fsanz_recalls",

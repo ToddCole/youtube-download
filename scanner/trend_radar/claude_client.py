@@ -47,6 +47,9 @@ WEB_SEARCH_USD = 0.01
 # Search results come back as input tokens; budget this many per search
 # when estimating a research call's worst case for the spend cap.
 EST_TOKENS_PER_SEARCH = 25_000
+# Web fetch server tool: no per-fetch fee; each opened page is capped at
+# FETCH_MAX_CONTENT_TOKENS input tokens.
+FETCH_MAX_CONTENT_TOKENS = 12_000
 
 
 def _int(value) -> int:
@@ -275,6 +278,7 @@ def call_web_research(
     max_searches: int,
     usage: UsageTotals,
     ledger: SpendLedger | None = None,
+    max_fetches: int = 0,
 ) -> tuple[str, list[dict]]:
     """One plain-text call with the web search server tool (capped at
     max_searches, searches localised to Australia). Returns the model's
@@ -289,10 +293,16 @@ def call_web_research(
     if ledger is not None:
         p_in, _p_out, _cr, _cw = price_for(model)
         search_worst = max_searches * (WEB_SEARCH_USD + EST_TOKENS_PER_SEARCH * p_in / 1_000_000)
-        ledger.check(estimate_call_cost(model, system, user_content, max_tokens) + search_worst)
+        fetch_worst = max_fetches * FETCH_MAX_CONTENT_TOKENS * p_in / 1_000_000
+        ledger.check(estimate_call_cost(model, system, user_content, max_tokens) + search_worst + fetch_worst)
 
     tools = [{"type": "web_search_20260209", "name": "web_search", "max_uses": max_searches,
               "user_location": AU_LOCATION}]
+    if max_fetches > 0:
+        # Opens a page (a paper, regulator notice, interview) the search found,
+        # so facts come from the source itself, not a search snippet.
+        tools.append({"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": max_fetches,
+                      "max_content_tokens": FETCH_MAX_CONTENT_TOKENS})
     messages: list[dict] = [{"role": "user", "content": user_content}]
     blocks: list = []
     for _attempt in range(MAX_PAUSE_RESUMES + 1):
@@ -323,6 +333,11 @@ def call_web_research(
                 if url and url not in sources:
                     sources[url] = {"url": url, "title": getattr(r, "title", None),
                                     "page_age": getattr(r, "page_age", None)}
+        elif getattr(b, "type", None) == "web_fetch_tool_result":
+            content = getattr(b, "content", None)
+            url = getattr(content, "url", None)
+            if url and getattr(content, "type", None) == "web_fetch_result":
+                sources.setdefault(url, {"url": url, "title": None, "page_age": None})["fetched"] = True
     if stop_reason == "max_tokens":
         text += "\n\n[research notes truncated]"
     return text, list(sources.values())

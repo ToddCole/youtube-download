@@ -61,11 +61,12 @@ class SelectionTests(unittest.TestCase):
 
     def test_fills_up_to_four_alternating_refresh_and_angle(self):
         ideas = evergreen.select(scan(n_picks=1), GSC, PAGES, set())
-        self.assertEqual([i["kind"] for i in ideas], ["refresh", "angle", "refresh"])
+        self.assertEqual([i["kind"] for i in ideas], ["refresh", "refresh", "angle"])
         self.assertEqual([i["rank"] for i in ideas], [101, 102, 103])
 
-    def test_busy_news_day_gets_no_evergreen(self):
-        self.assertEqual(evergreen.select(scan(n_picks=4), GSC, PAGES, set()), [])
+    def test_busy_news_day_still_gets_two_refreshes(self):
+        ideas = evergreen.select(scan(n_picks=4), GSC, PAGES, set())
+        self.assertEqual([i["kind"] for i in ideas], ["refresh", "refresh"])
 
     def test_pages_already_picked_for_an_update_are_skipped(self):
         s = scan(n_picks=2)
@@ -106,7 +107,7 @@ class DigestTests(unittest.TestCase):
             msgs = digest.build_messages(scan(n_picks=1, why_moving_now="x"), {}, None,
                                          now=datetime(2026, 11, 12, 7, 5), evergreen=ideas)
         self.assertEqual(len(msgs), 4)
-        refresh, angle = msgs[1], msgs[2]
+        refresh, angle = msgs[1], msgs[3]
         self.assertEqual(refresh["title"], "🌲 Evergreen: refresh Physical 100 Italy cast")
         self.assertIn("#10.8 for 'physical 100 italy' (2k impressions", refresh["message"])
         self.assertIn("Split ranking: /physical-100-italy-challenges/", refresh["message"])

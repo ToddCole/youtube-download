@@ -22,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 
 import settings  # noqa: F401  (loads .env)
+from trend_radar import sent_log
 
 SCANNER_DIR = Path(__file__).resolve().parent
 TREND_DB = SCANNER_DIR / "trend_radar.db"
@@ -182,13 +183,20 @@ def fit_food_message(pick: dict, seo: dict | None, label: str, rank: int, scan_i
     }
 
 
-def fit_food_messages(scan: dict, scores: dict[int, dict]) -> list[dict]:
-    """The scanner-led picks, then any extra story only the web-only search found."""
+def fit_food_messages(scan: dict, scores: dict[int, dict], sent: list[dict] | None = None) -> list[dict]:
+    """The scanner-led picks, then any extra story only the web-only search
+    found; stories already sent recently are left out."""
     from trend_radar.claude_fit_food import shown_picks
 
     scan_id = scan.get("_scan_id")
-    return [fit_food_message(pick, scores.get(rank), label, rank, scan_id, n == 0)
-            for n, (label, rank, pick) in enumerate(shown_picks(scan.get("fit_food") or {}))]
+    shown = [(label, rank, pick) for label, rank, pick in shown_picks(scan.get("fit_food") or {})
+             if not is_repeat(fit_food_item(pick), sent or [])]
+    out = []
+    for n, (label, rank, pick) in enumerate(shown):
+        m = fit_food_message(pick, scores.get(rank), label, rank, scan_id, n == 0)
+        m["_item"] = fit_food_item(pick)
+        out.append(m)
+    return out
 
 
 def fit_food_comparison_text(scan: dict) -> str | None:
@@ -216,31 +224,80 @@ def fit_food_comparison_text(scan: dict) -> str | None:
     return "\n".join(lines)
 
 
+def news_item(c: dict) -> dict:
+    return sent_log.item("news", c.get("headline"), *[e.get("url") for e in c.get("evidence") or []],
+                         c.get("update_url"))
+
+
+def fit_food_item(p: dict) -> dict:
+    return sent_log.item("fit_food", p.get("headline"), p.get("original_source_url"), p.get("other_outlet_url"),
+                         p.get("update_url"))
+
+
+def evergreen_item(idea: dict) -> dict:
+    if idea.get("kind") == "refresh":
+        return sent_log.item("refresh", idea.get("title"), idea.get("url"))
+    return sent_log.item("evergreen", idea.get("title"), idea.get("url"))
+
+
+def is_repeat(it: dict, sent: list[dict]) -> bool:
+    return bool(sent) and sent_log.is_repeat(it, sent) is not None
+
+
+RISING_PAGES = 3
+
+
+def rising_messages(emerging: dict | None, sent: list[dict]) -> list[dict]:
+    """📈 the pages with the most new search impressions this week, one
+    message per page with its new queries (pages sent recently skipped)."""
+    by_page: dict[str, list[dict]] = {}
+    for r in (emerging or {}).get("rows") or []:
+        if r.get("page"):
+            by_page.setdefault(r["page"], []).append(r)
+    ranked = sorted(by_page.items(), key=lambda kv: -sum(r.get("impressions_7d") or 0 for r in kv[1]))
+    out = []
+    for page, rows in ranked:
+        it = sent_log.item("rising", rows[0].get("query"), page)
+        if is_repeat(it, sent):
+            continue
+        rows.sort(key=lambda r: -(r.get("impressions_7d") or 0))
+        total = sum(r.get("impressions_7d") or 0 for r in rows)
+        queries = ", ".join(f"'{r['query']}' #{r['position']:.0f}" if r.get("position") else f"'{r['query']}'"
+                            for r in rows[:4])
+        out.append({
+            "title": f"📈 Rising in Google: {page.replace(sent_log.MFO_PREFIX, '') or page}",
+            "message": f"{_k(total)} new impressions this week across {len(rows)} search"
+                       f"{'es' if len(rows) != 1 else ''}, almost none before: {queries}.\n"
+                       "Feed it: update or expand the page, or write the follow-up.",
+            "priority": 2, "tags": ["chart_with_upwards_trend"], "click": page, "actions": [], "_item": it,
+        })
+        if len(out) >= RISING_PAGES:
+            break
+    return out
+
+
 def build_messages(scan: dict, scores: dict[int, dict], emerging: dict | None, now: datetime | None = None,
-                   evergreen: list[dict] | None = None) -> list[dict]:
+                   evergreen: list[dict] | None = None, sent: list[dict] | None = None) -> list[dict]:
+    """Every notification for this scan. sent: sent_log.recent() -- items
+    already sent in the last week are left out."""
     now = now or datetime.now()
+    sent = sent or []
     slot = "Morning" if now.hour < 12 else "Afternoon"
-    picks = _sorted_picks(scan, scores)
+    picks = [c for c in _sorted_picks(scan, scores) if not is_repeat(news_item(c), sent)]
+    evergreen = [i for i in evergreen or [] if not is_repeat(evergreen_item(i), sent)]
     scan_id = scan.get("_scan_id")
     if picks:
-        messages = [pick_message(c, scores.get(c.get("rank")), n, len(picks), slot, scan_id)
+        messages = [{**pick_message(c, scores.get(c.get("rank")), n, len(picks), slot, scan_id), "_item": news_item(c)}
                     for n, c in enumerate(picks, 1)]
     else:
         messages = [{
-            "title": f"MFO {slot}: nothing strong today",
+            "title": f"MFO {slot}: nothing new strong enough today",
             "message": _clip(scan.get("corpus_summary") or "No pick cleared the bar this scan.", 400),
             "priority": 2, "tags": ["zzz"], "actions": [],
         }]
-    messages += [evergreen_message(idea, scan_id) for idea in evergreen or []]
-    messages += fit_food_messages(scan, scores)
-    rows = (emerging or {}).get("rows") or []
-    if rows:
-        top = rows[0]
-        messages.append({
-            "title": f"📈 New in Google: '{top.get('query')}'",
-            "message": f"{_k(top.get('impressions_7d') or 0)} impressions this week, almost none before. Feed it: update or expand the page.",
-            "priority": 2, "tags": ["chart_with_upwards_trend"], "click": top.get("page"), "actions": [],
-        })
+    messages += [{**evergreen_message(idea, scan_id), "_item": evergreen_item(idea)} for idea in evergreen]
+    messages += fit_food_messages(scan, scores, sent)
+    messages += rising_messages(emerging, sent)
     for m in messages:
         if not m.get("click"):
             m.pop("click", None)
@@ -318,8 +375,16 @@ def send_digest(force: bool = False, dry_run: bool = False, db_path: Path = TREN
         return "already sent"
     import evergreen
 
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    try:
+        sent = sent_log.recent(conn)
+    finally:
+        conn.close()
     messages = build_messages(scan, load_scores(scan["_scan_id"], db_path), load_emerging(db_path),
-                              evergreen=evergreen.load(scan["_scan_id"], db_path))
+                              evergreen=evergreen.load(scan["_scan_id"], db_path), sent=sent)
+    items = [m.pop("_item") for m in messages if "_item" in m]
     if dry_run:
         return "\n\n".join(
             f"[p{m['priority']}] {m['title']}\n{m['message']}\n  tap -> {m.get('click', '-')}\n"
@@ -338,6 +403,11 @@ def send_digest(force: bool = False, dry_run: bool = False, db_path: Path = TREN
     if sent or emailed:
         # Even a partial send counts: re-sending would duplicate what arrived.
         _mark_sent(scan.get("_scan_id"))
+        conn = sqlite3.connect(db_path)
+        try:
+            sent_log.record(conn, items)
+        finally:
+            conn.close()
     push_ok = not pushing or sent == len(messages)
     email_ok = not emailing or emailed
     if push_ok and email_ok:

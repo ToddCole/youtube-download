@@ -38,6 +38,7 @@ TREND_DB = SCANNER_DIR / "trend_radar.db"
 MFO_PREFIX = "https://mensfitnessonline.com.au"
 
 TARGET_SLOTS = 4
+MIN_REFRESHES = 2  # Google-backed refreshes are free and proven demand: at least this many every scan
 RANK_BASE = 100
 STRIKE_MIN, STRIKE_MAX = 4.5, 20.0
 MIN_PAGE_IMPRESSIONS = 200
@@ -184,13 +185,16 @@ def load(scan_id, db_path: Path = TREND_DB) -> list[dict]:
 
 
 def select(scan: dict, gsc: list[dict], pages: list[dict], exclude: set[str]) -> list[dict]:
+    """MIN_REFRESHES Google-backed refreshes every scan, then refreshes and
+    new angles alternating to fill what the news picks leave of TARGET_SLOTS."""
     slots = max(0, TARGET_SLOTS - len(scan.get("candidates") or []))
-    if not slots:
-        return []
     now = datetime.now(timezone.utc)
     taken = exclude | {_norm_url(c.get("update_url")) for c in scan.get("candidates") or [] if c.get("update_url")}
-    ideas = _interleave(find_refreshes(gsc, pages, taken, now), find_angles(scan, taken))
-    return [{**idea, "rank": RANK_BASE + n} for n, idea in enumerate(ideas[:slots], 1)]
+    refreshes = find_refreshes(gsc, pages, taken, now)
+    ideas = refreshes[:MIN_REFRESHES]
+    extra = max(0, slots - len(ideas))
+    ideas += _interleave(find_angles(scan, taken), refreshes[MIN_REFRESHES:])[:extra]
+    return [{**idea, "rank": RANK_BASE + n} for n, idea in enumerate(ideas, 1)]
 
 
 def compute(scan: dict, gsc: list[dict] | None, pages: list[dict], db_path: Path = TREND_DB,

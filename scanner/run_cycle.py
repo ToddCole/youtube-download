@@ -33,7 +33,7 @@ CLAUDE_OUTPUT = REPORTS / "trend-claude-latest.json"
 STALE_HOURS = 20
 # Local hours (Mac clock) at which the paid Claude scan runs. Must line up
 # with the launchd 3-hourly grid.
-CLAUDE_HOURS = {7, 16}
+CLAUDE_HOURS = {7}  # one paid scan a day (13 Nov 2026); the other cycles collect and learn only
 DESK_URL = "http://127.0.0.1:8090/"
 
 

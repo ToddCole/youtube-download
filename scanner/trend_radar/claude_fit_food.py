@@ -144,8 +144,10 @@ def today_line(now: datetime | None = None) -> str:
 
 
 def research_content(brief: str, signals: list[EvidenceRecord] | None, pages: list[dict],
-                     recent: list[dict] | None = None) -> str:
+                     recent: list[dict] | None = None, already_sent: str | None = None) -> str:
     parts = [today_line(), "FIT FOOD BRIEF (from the editor)\n\n" + brief.strip()]
+    if already_sent:
+        parts.append(already_sent)
     if recent:
         parts.append("MFO PUBLISHED IN THE LAST 14 DAYS (already covered: never pick these stories again; "
                      "a genuinely new development on one is an 'add to existing post' pick)\n\n"
@@ -164,9 +166,31 @@ def _norm(url: str | None) -> str:
     return (url or "").strip().rstrip("/").lower()
 
 
-def repair_picks(output: FitFoodOutput, seen_urls: set[str], mfo_urls: set[str]) -> list[str]:
-    """Drop any URL the research never saw; keep at most MAX_PICKS."""
+def repair_picks(output: FitFoodOutput, seen_urls: set[str], mfo_urls: set[str],
+                 fetched: set[str] | None = None, recent: list[dict] | None = None) -> list[str]:
+    """Drop any URL the research never saw; "opened" only when the research
+    really fetched the source; drop an "add to existing post" pick whose MFO
+    post came out on or after the story itself (MFO already covered it);
+    keep at most MAX_PICKS."""
     notes = []
+    if recent:
+        posted = {_norm(p.get("url")): (p.get("date") or "")[:10] for p in recent if p.get("url")}
+        kept = []
+        for pick in output.picks:
+            post_date = posted.get(_norm(pick.update_url))
+            story_date = (pick.first_published or "")[:10]
+            if post_date and re.fullmatch(r"\d{4}-\d{2}-\d{2}", story_date) and post_date >= story_date:
+                notes.append(f"fit food {pick.headline[:50]!r}: dropped, MFO covered it on {post_date} "
+                             f"({pick.update_url})")
+                continue
+            kept.append(pick)
+        output.picks = kept
+    if fetched is not None:
+        opened = {_norm(u) for u in fetched}
+        for pick in output.picks:
+            if pick.original_source_opened and _norm(pick.original_source_url) not in opened:
+                pick.original_source_opened = False
+                notes.append(f"fit food {pick.headline[:50]!r}: source marked opened but was never fetched")
     seen = {_norm(u) for u in seen_urls}
     allowed_mfo = {_norm(u) for u in mfo_urls}
     for pick in output.picks:
@@ -191,19 +215,21 @@ def repair_picks(output: FitFoodOutput, seen_urls: set[str], mfo_urls: set[str])
 
 def run_mode(client, *, model: str, mode: str, brief: str, signals: list[EvidenceRecord] | None,
              pages: list[dict], max_searches: int, ledger: SpendLedger | None,
-             recent: list[dict] | None = None) -> dict:
+             recent: list[dict] | None = None, already_sent: str | None = None, max_fetches: int = 0) -> dict:
     usage = UsageTotals(model=model)
     started = time.monotonic()
-    research_input = research_content(brief, signals if mode == "scanner" else None, pages, recent)
+    research_input = research_content(brief, signals if mode == "scanner" else None, pages, recent, already_sent)
     notes, sources = call_web_research(
         client, model=model, system=FIT_FOOD_RESEARCH_SYSTEM_PROMPT, user_content=research_input,
         max_tokens=RESEARCH_MAX_TOKENS, max_searches=max_searches, usage=usage, ledger=ledger,
+        max_fetches=max_fetches,
     )
     picks_input = (
         today_line() + "\n\nFIT FOOD BRIEF (from the editor)\n\n" + brief.strip()
         + "\n\nMFO PAGES\n\n" + "\n".join(f"- {p['title']} | {p['url']}" for p in pages)
         + "\n\nMFO PUBLISHED IN THE LAST 14 DAYS (never pick these again)\n\n"
         + ("\n".join(f"- {p['date']} {p['title']} | {p['url']}" for p in recent or []) or "- (none)")
+        + (f"\n\n{already_sent}" if already_sent else "")
         + "\n\nRESEARCH NOTES\n\n" + notes
     )
     output: FitFoodOutput = call_structured(
@@ -212,10 +238,11 @@ def run_mode(client, *, model: str, mode: str, brief: str, signals: list[Evidenc
     )
     seen_urls = {s["url"] for s in sources} | {e.url for e in (signals or []) if e.url}
     mfo_urls = {p["url"] for p in pages + (recent or []) if p.get("url")} | brief_page_urls(brief)
-    repairs = repair_picks(output, seen_urls, mfo_urls)
+    fetched = {s["url"] for s in sources if s.get("fetched")}
+    repairs = repair_picks(output, seen_urls, mfo_urls, fetched=fetched, recent=recent)
     return {
         "mode": mode, **output.model_dump(), "repairs": repairs, "research_notes": notes,
-        "sources_seen": len(sources), "signals_given": len(signals or []) if mode == "scanner" else 0,
+        "sources_seen": len(sources), "pages_opened": len(fetched), "signals_given": len(signals or []) if mode == "scanner" else 0,
         "usage": usage.as_dict(), "seconds": round(time.monotonic() - started, 1),
     }
 
@@ -237,7 +264,8 @@ def compare_enabled(config: dict, today=None) -> bool:
 
 
 def run_fit_food(client, *, model: str, evidence: list[EvidenceRecord], ledger: SpendLedger | None,
-                 config: dict | None = None, brief_path: Path = BRIEF_PATH, index_path: Path = MFO_INDEX) -> dict:
+                 config: dict | None = None, brief_path: Path = BRIEF_PATH, index_path: Path = MFO_INDEX,
+                 already_sent: str | None = None) -> dict:
     """Both modes in parallel. A failing mode is recorded, never raised."""
     config = load_config() if config is None else config
     brief = brief_path.read_text(encoding="utf-8")
@@ -245,12 +273,14 @@ def run_fit_food(client, *, model: str, evidence: list[EvidenceRecord], ledger: 
     pages = mfo_food_pages(config.get("mfo_page_keywords") or [], index_path)
     recent = recent_posts(index_path)
     max_searches = int(config.get("max_searches") or 15)
+    max_fetches = int(config.get("max_fetches") or 0)
     modes = MODES if compare_enabled(config) else ("scanner",)
 
     def one(mode: str) -> dict:
         try:
             return run_mode(client, model=model, mode=mode, brief=brief, signals=signals, pages=pages,
-                            max_searches=max_searches, ledger=ledger, recent=recent)
+                            max_searches=max_searches, ledger=ledger, recent=recent,
+                            already_sent=already_sent, max_fetches=max_fetches)
         except Exception as exc:  # noqa: BLE001 -- fit food is an extra; the scan is kept either way
             return {"mode": mode, "error": f"{exc.__class__.__name__}: {exc}", "picks": []}
 

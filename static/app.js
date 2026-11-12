@@ -766,7 +766,7 @@ function renderToday() {
   if (!leads.length) {
     list.textContent = meta
       ? `Nothing strong enough to pick this scan. ${meta.corpus_summary || ""}`.trim()
-      : "No Claude news scan yet. Scans run at 07:05 and 16:05.";
+      : "No Claude news scan yet. The scan runs daily at 07:05.";
   }
   leads.forEach((lead) => {
     const evidence = (lead.evidence || []).slice(0, 6).map((e) =>

@@ -79,15 +79,15 @@ class DigestTests(unittest.TestCase):
     def test_empty_scan_sends_one_quiet_nothing_today(self):
         msgs = self.build({}, scan={"_scan_id": 8, "corpus_summary": "Quiet day.", "candidates": []}, hour=16)
         self.assertEqual(len(msgs), 1)
-        self.assertEqual(msgs[0]["title"], "MFO Afternoon: nothing strong today")
+        self.assertEqual(msgs[0]["title"], "MFO Afternoon: nothing new strong enough today")
         self.assertEqual(msgs[0]["message"], "Quiet day.")
 
     def test_emerging_demand_is_its_own_quiet_notification(self):
         emerging = {"rows": [{"query": "100 physique france", "impressions_7d": 1157,
                               "page": "https://mensfitnessonline.com.au/100-physique-france/"}]}
         last = self.build({}, emerging)[-1]
-        self.assertEqual(last["title"], "📈 New in Google: '100 physique france'")
-        self.assertIn("1.2k impressions", last["message"])
+        self.assertEqual(last["title"], "📈 Rising in Google: /100-physique-france/")
+        self.assertIn("1.2k new impressions", last["message"])
         self.assertEqual(last["click"], "https://mensfitnessonline.com.au/100-physique-france/")
 
     def test_no_topic_means_no_vote_buttons(self):

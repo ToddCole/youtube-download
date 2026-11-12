@@ -61,6 +61,13 @@ The question is not "what is spreading?" but "what is worth MFO's time today?" J
   and say plainly that the news itself is old.
 - Fit: MFO's readers are Australian men who train. An Australian person, event, regulator or study \
   outranks an equivalent overseas one; for overseas stories, say why an Australian reader cares.
+- Stories about women: pick them when the woman is the story in her own right -- an extraordinary \
+  feat or record, a contestant in a competition, show or event MFO already covers (its pages are given \
+  to you), or a case whose lesson applies to men who train (e.g. an injury or health warning that \
+  isn't sex-specific). MFO's readers are also husbands, partners \
+  and fathers, so a story that helps them support a wife, partner or daughter (her pregnancy, \
+  menopause, a daughter's sport) can work too, when that is the angle. Otherwise skip women-specific \
+  health and training. For any story about a woman, mfo_angle must say plainly why a male reader cares.
 - Evidence: several independent sources, or one authoritative source (a regulator, a peer-reviewed \
   trial or review, official results, a governing body). One authoritative source is enough. Several \
   outlets rewriting the same press release are one source.

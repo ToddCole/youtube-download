@@ -1,35 +1,64 @@
 # Handover: MFO Editorial Desk scanner
 
-Last updated 9 Nov 2026. Branch: `feature/mfo-trend-radar-claude`.
+Last updated 13 Nov 2026. Branch: `feature/mfo-trend-radar-claude`.
 
-**Status: stood down for handover, 9 Nov 2026.** No work is in progress on this
-machine. The scheduled scans keep running. Next step is the checks below.
+**Status: on a one-week value trial, 13–20 Nov 2026.** The editor judged
+the paid scans poor value on 12–13 Nov: mostly repeats and unchecked picks,
+while the useful items came from free Google data. The fixes below shipped
+on 13 Nov. The test: if the scanner doesn't give at least one story a day
+the editor would publish, turn off the paid Claude scans
+(`MFO_CLAUDE_SCAN=0`, or drop the hour from `CLAUDE_HOURS` in
+`run_cycle.py`) and keep the free Google side.
 
 ## Where it stands
 
-The five-phase scanner upgrade and the phone digest are built and pushed.
-147 tests pass: from `scanner/`, run `python3 -m pytest -q test_*.py`.
+184 tests pass: from `scanner/`, run `python3 -m pytest -q`.
 
-Pipeline: learn -> collect -> Claude (discovery, expansion, web research,
-editorial) -> SEO -> ntfy digest. launchd runs `com.mfo.editorial-cycle` every
-3 hours at :05. The paid Claude scan runs at 07:05 and 16:05 only.
+Pipeline: learn -> collect -> Claude scan -> SEO -> digest (phone via ntfy
+and email). launchd runs `com.mfo.editorial-cycle` every 3 hours at :05.
+The paid Claude scan runs **once a day at 07:05** (`CLAUDE_HOURS`). Daily cap:
+`MFO_CLAUDE_DAILY_CAP_USD` in `.env`.
 
-Last live scan: 9 Nov, about US$1.14 with 8 web searches. That is roughly
-US$68 a month at two scans a day.
+What each scan produces:
+- **News picks**: discovery, expansion, web research and the editorial pass.
+- **Fit food**: a pass on the editor's brief (`fit_food_brief.md`, settings in
+  `fit_food.json`) with its own 15 food, supplement and nutrition-research
+  sources. Once a day. The web-only comparison search is off (`compare`).
+- **Evergreen**: at least 2 refreshes of MFO pages ranking 5–20 in Google
+  (free GSC data), plus new angles on quiet days. Translated pages are skipped.
+- **Rising in Google**: up to 3 pages with new search impressions this week.
 
-## Still to check
+The Today board at localhost:8090 shows all four.
 
-- Freshness gate: added after the last live scan, so it hasn't run live yet.
-  After the 9 Nov 16:05 scan, check recirculated stories aren't picked as new.
-- Phone digest: the step reported sent, but arrival on the phone isn't confirmed.
-- Tate-Miles Masters Games results: last scan held it because web research
-  only found a headline, with no figures.
+## Changed 13 Nov (check these during the trial)
+
+- **Repeat filter** (`trend_radar/sent_log.py`): everything the digest sends
+  is logged. For 7 days the same story is left out of the digest, and both
+  scans see the list so a story only returns with a real new development.
+- **Web fetch**: research can open up to 6 pages per pass
+  (`MFO_WEB_FETCH_MAX`, `max_fetches` in `fit_food.json`). It works on news
+  sites. TGA and Nature block it, so regulator notices and papers still show
+  "not opened". A pick is only marked opened if a fetch succeeded.
+- **MFO index**: the site retired 236 posts on 12 Nov (now 482). The index
+  refresh refuses a drop of more than 10%; the new count was accepted by hand.
+  If it trips again after a deliberate cleanup, re-run the refresh with
+  `MFO_INDEX_MIN_KEEP_RATIO = 0` (see `scanner.py`).
+
+Expected cost: about US$1.30–1.60 a day.
+
+## Review on 20 Nov
+
+Compare `sent_items` and `claude_scans` in `trend_radar.db` with what MFO
+published (`mfo_index.json`) and the 👍/👎 votes (`pick_feedback`). Count
+the days with at least one publishable story, then make the keep-or-kill call.
 
 ## On the other Mac
 
 - `git pull`
 - `python3 -m pip install -U yt-dlp` (2026.10.26 fixed the YouTube 403s)
 - `scanner/open_stories.json` is gitignored and rebuilt before each Claude scan.
+- `.env` needs the email settings (`MFO_EMAIL_TO`, `SMTP_PASSWORD`) for the
+  email digest.
 
 ## Rules
 

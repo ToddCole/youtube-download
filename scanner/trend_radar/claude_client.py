@@ -333,11 +333,21 @@ def call_web_research(
                 if url and url not in sources:
                     sources[url] = {"url": url, "title": getattr(r, "title", None),
                                     "page_age": getattr(r, "page_age", None)}
-        elif getattr(b, "type", None) == "web_fetch_tool_result":
-            content = getattr(b, "content", None)
-            url = getattr(content, "url", None)
-            if url and getattr(content, "type", None) == "web_fetch_result":
-                sources.setdefault(url, {"url": url, "title": None, "page_age": None})["fetched"] = True
+    # A page counts as opened only when its web_fetch call came back without
+    # an error. The URL is read from the call (with dynamic filtering the
+    # fetch runs inside code execution, and the result's shape varies).
+    fetch_urls = {getattr(b, "id", None): (getattr(b, "input", None) or {}).get("url")
+                  for b in blocks if getattr(b, "type", None) == "server_tool_use"
+                  and getattr(b, "name", None) == "web_fetch" and isinstance(getattr(b, "input", None), dict)}
+    for b in blocks:
+        if getattr(b, "type", None) != "web_fetch_tool_result":
+            continue
+        content = getattr(b, "content", None)
+        kind = content.get("type") if isinstance(content, dict) else getattr(content, "type", None)
+        url = fetch_urls.get(getattr(b, "tool_use_id", None)) or (
+            content.get("url") if isinstance(content, dict) else getattr(content, "url", None))
+        if url and kind != "web_fetch_tool_result_error":
+            sources.setdefault(url, {"url": url, "title": None, "page_age": None})["fetched"] = True
     if stop_reason == "max_tokens":
         text += "\n\n[research notes truncated]"
     return text, list(sources.values())

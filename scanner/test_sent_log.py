@@ -117,7 +117,11 @@ def test_web_research_offers_fetch_and_reports_opened_pages():
                             cache_creation_input_tokens=0, server_tool_use=None)
     final = SimpleNamespace(stop_reason="end_turn", usage=usage, content=[
         SimpleNamespace(type="web_search_tool_result", content=[SimpleNamespace(url="https://a.org/p", title="P", page_age=None)]),
-        SimpleNamespace(type="web_fetch_tool_result", content=SimpleNamespace(type="web_fetch_result", url="https://a.org/p")),
+        SimpleNamespace(type="server_tool_use", id="f1", name="web_fetch", input={"url": "https://a.org/p"}),
+        SimpleNamespace(type="web_fetch_tool_result", tool_use_id="f1", content=SimpleNamespace(type="web_fetch_result")),
+        SimpleNamespace(type="server_tool_use", id="f2", name="web_fetch", input={"url": "https://blocked.org/x"}),
+        SimpleNamespace(type="web_fetch_tool_result", tool_use_id="f2",
+                        content=SimpleNamespace(type="web_fetch_tool_result_error", error_code="url_not_accessible")),
         SimpleNamespace(type="text", text="notes"),
     ])
     seen = {}

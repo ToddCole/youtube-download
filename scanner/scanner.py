@@ -62,7 +62,8 @@ VIDEOS_PER_CHANNEL = 5
 SHORTS_MAX_SECONDS = 180
 MFO_SITE_URL = "https://mensfitnessonline.com.au"
 MFO_INDEX_MAX_AGE_HOURS = 24
-USER_AGENT = "MFO YouTube Scanner/1.0 (+https://mensfitnessonline.com.au)"
+# No URL in the UA: the TGA firewall drops requests whose User-Agent contains "https://".
+USER_AGENT = "MFO YouTube Scanner/1.0 (+mensfitnessonline.com.au)"
 NCBI_TOOL_NAME = "mfo-editorial-scanner"
 STOPWORDS = {
     "about",

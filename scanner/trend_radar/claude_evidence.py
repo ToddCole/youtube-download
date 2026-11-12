@@ -28,6 +28,7 @@ class EvidenceRecord:
     body_excerpt: str
     url: str | None
     discovery_method: str
+    source_id: str | None = None  # internal (packet filtering); never sent to the model
 
     def to_prompt_dict(self, ref: str | None = None, include_url: bool = True) -> dict:
         """With `ref`, the record is cited by a short per-run alias (e.g.
@@ -81,6 +82,7 @@ def _row_to_record(row: sqlite3.Row) -> EvidenceRecord:
         body_excerpt=_excerpt(row["body_text"]),
         url=row["url"],
         discovery_method=_discovery_method(row),
+        source_id=row["source_id"],
     )
 
 
@@ -89,6 +91,7 @@ def build_evidence_packet(
     lookback_days: int,
     max_signals: int,
     now: datetime | None = None,
+    include_source=None,
 ) -> list[EvidenceRecord]:
     """Signals from the last `lookback_days`, deduplicated by canonical_url
     (falling back to url, then to the signal_id itself for URL-less manual
@@ -97,7 +100,10 @@ def build_evidence_packet(
     Selection is a fair share across sources: each source's newest signal
     first, then each source's second-newest, and so on, so one prolific
     feed (Men's Journal posts ~90/day) can't crowd a TGA alert or a single
-    study out of the packet. The result is returned newest first."""
+    study out of the packet. The result is returned newest first.
+
+    include_source(source_id) -> bool, when given, limits the packet to
+    the sources it accepts (the news scan leaves out the fit-food sources)."""
     now = now or datetime.now(timezone.utc)
     cutoff = (now - timedelta(days=lookback_days)).isoformat(timespec="seconds").replace("+00:00", "Z")
     rows = conn.execute(
@@ -116,6 +122,8 @@ def build_evidence_packet(
     seen_identity: set[str] = set()
     per_source: dict[str, list[sqlite3.Row]] = {}
     for row in rows:  # newest first
+        if include_source is not None and not include_source(row["source_id"]):
+            continue
         identity = row["canonical_url"] or row["url"] or f"signal:{row['signal_id']}"
         if identity in seen_identity:
             continue
@@ -143,7 +151,7 @@ def record_for_signal_id(conn: sqlite3.Connection, signal_id: str) -> EvidenceRe
     for freshly-expanded signals without re-running the whole packet
     query)."""
     row = conn.execute(
-        """SELECT signal_id, lane, platform, source_name, author_or_account,
+        """SELECT signal_id, source_id, lane, platform, source_name, author_or_account,
                   published_at, timestamp_precision, title, body_text, url,
                   canonical_url, first_seen_at, created_by_run_id
            FROM raw_signals WHERE signal_id = ?""",

@@ -5,7 +5,9 @@ opens the story's source (or the MFO page, for an update), with Source,
 👍 and 👎 buttons. Sent by run_cycle.py once per new scan (07:05 =
 morning, 16:05 = afternoon). The first pick buzzes (priority 4 when it's
 a strong Write now); the rest arrive quietly. On a quiet news day,
-🌲 evergreen ideas (evergreen.py) top the digest up to four.
+🌲 evergreen ideas (evergreen.py) top the digest up to four. 🥗 fit-food
+picks (fit_food_brief.md) follow; the email adds the scanner-led vs
+web-only comparison.
 
 Manual:  python3 digest.py [--dry-run] [--force]
 """
@@ -14,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -141,6 +144,78 @@ def evergreen_message(idea: dict, scan_id) -> dict:
     }
 
 
+FIT_FOOD_RANK_BASE = {"scanner": 200, "web_only": 300}  # matches seo_opportunity.py
+
+
+def _domain(url: str | None) -> str:
+    m = re.match(r"https?://(?:www\.)?([^/]+)", url or "")
+    return m.group(1) if m else ""
+
+
+def fit_food_message(pick: dict, seo: dict | None, label: str, rank: int, scan_id, first: bool) -> dict:
+    """🥗 one fit-food pick: why it matters, when, the source and its facts."""
+    lines = []
+    head = f"{pick.get('fit_score')}/10 fit · {pick.get('format')}"
+    if pick.get("update_url"):
+        head += f": {pick['update_url'].replace('https://mensfitnessonline.com.au', '')}"
+    lines.append(head)
+    if seo:
+        lines.append(f"{VERDICT_MARK.get(seo.get('verdict'), '•')} {_volume_line(seo)} ('{pick.get('search_term')}')")
+    lines.append(f"Why: {_clip(pick.get('why_care'), 200)}")
+    source = pick.get("original_source_url")
+    opened = "opened" if pick.get("original_source_opened") else "not opened"
+    lines.append(f"When: {_clip(pick.get('first_published'), 80)} · source: {_domain(source) or 'none verified'} ({opened})")
+    lines.append(f"Facts: {_clip(pick.get('facts'), 320)}")
+    lines.append(f"Risk: {_clip(pick.get('risk'), 180)}")
+    actions = []
+    if pick.get("other_outlet_url"):
+        actions.append({"action": "view", "label": _domain(pick["other_outlet_url"])[:20] or "Outlet",
+                        "url": pick["other_outlet_url"], "clear": False})
+    actions += vote_actions(scan_id, rank, _clip(pick.get("headline"), 60))
+    return {
+        "title": f"🥗 {label}: {_clip(pick.get('headline'), 85)}",
+        "message": "\n".join(lines),
+        "priority": 3 if first and (pick.get("fit_score") or 0) >= 8 else 2,
+        "tags": ["green_salad"],
+        "click": source or pick.get("other_outlet_url") or pick.get("update_url"),
+        "actions": actions,
+    }
+
+
+def fit_food_messages(scan: dict, scores: dict[int, dict]) -> list[dict]:
+    """The scanner-led picks, then any extra story only the web-only search found."""
+    from trend_radar.claude_fit_food import shown_picks
+
+    scan_id = scan.get("_scan_id")
+    return [fit_food_message(pick, scores.get(rank), label, rank, scan_id, n == 0)
+            for n, (label, rank, pick) in enumerate(shown_picks(scan.get("fit_food") or {}))]
+
+
+def fit_food_comparison_text(scan: dict) -> str | None:
+    """Email-only block: what each search found, side by side."""
+    from trend_radar.claude_fit_food import compare
+
+    result = compare(scan.get("fit_food") or {})
+    if not result:
+        return None
+
+    def line(p):
+        return f"  - {p.get('fit_score')}/10 {p.get('headline')}"
+
+    lines = ["FIT FOOD: SCANNER-LED vs WEB-ONLY SEARCH", ""]
+    lines.append(f"Both found ({len(result['both'])}):")
+    lines += [line(sp) for sp, _wp in result["both"]] or ["  - none"]
+    lines.append(f"Only the scanner-led search ({len(result['scanner_only'])}):")
+    lines += [line(p) for p in result["scanner_only"]] or ["  - none"]
+    lines.append(f"Only the web-only search ({len(result['web_only'])}):")
+    lines += [line(p) for p in result["web_only"]] or ["  - none"]
+    for key, name in (("scanner", "Scanner-led"), ("web", "Web-only")):
+        err = result.get(f"{key}_error")
+        summary = f"failed: {err}" if err else result.get(f"{key}_summary")
+        lines.append(f"{name} (US${result.get(f'{key}_cost')}): {_clip(summary, 400)}")
+    return "\n".join(lines)
+
+
 def build_messages(scan: dict, scores: dict[int, dict], emerging: dict | None, now: datetime | None = None,
                    evergreen: list[dict] | None = None) -> list[dict]:
     now = now or datetime.now()
@@ -157,6 +232,7 @@ def build_messages(scan: dict, scores: dict[int, dict], emerging: dict | None, n
             "priority": 2, "tags": ["zzz"], "actions": [],
         }]
     messages += [evergreen_message(idea, scan_id) for idea in evergreen or []]
+    messages += fit_food_messages(scan, scores)
     rows = (emerging or {}).get("rows") or []
     if rows:
         top = rows[0]
@@ -258,7 +334,7 @@ def send_digest(force: bool = False, dry_run: bool = False, db_path: Path = TREN
     if not pushing and not emailing:
         return "not sent (no NTFY_TOPIC or email configured)"
     sent = publish(messages) if pushing else 0
-    emailed = mailer.send(*build_email(messages)) if emailing else False
+    emailed = mailer.send(*build_email(messages, fit_food_comparison_text(scan))) if emailing else False
     if sent or emailed:
         # Even a partial send counts: re-sending would duplicate what arrived.
         _mark_sent(scan.get("_scan_id"))
@@ -276,9 +352,10 @@ def send_digest(force: bool = False, dry_run: bool = False, db_path: Path = TREN
     return f"partly sent ({', '.join(failed)})"
 
 
-def build_email(messages: list[dict]) -> tuple[str, str]:
+def build_email(messages: list[dict], extra: str | None = None) -> tuple[str, str]:
     """The whole digest as one email: subject from the first pick, then
-    each notification with its links (ntfy vote buttons don't carry over)."""
+    each notification with its links (ntfy vote buttons don't carry over),
+    then any email-only extra (the fit-food comparison)."""
     first = messages[0]["title"]
     subject = f"MFO Desk: {first}" + (f" (+{len(messages) - 1} more)" if len(messages) > 1 else "")
     blocks = []
@@ -288,6 +365,8 @@ def build_email(messages: list[dict]) -> tuple[str, str]:
         links += [a["url"] for a in m.get("actions") or [] if a.get("action") == "view" and a["url"] not in links]
         lines += [f"→ {url}" for url in links]
         blocks.append("\n".join(lines))
+    if extra:
+        blocks.append(extra)
     return subject, "\n\n" + ("\n\n" + "─" * 40 + "\n\n").join(blocks) + "\n"
 
 

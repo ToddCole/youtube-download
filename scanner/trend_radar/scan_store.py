@@ -48,3 +48,24 @@ def latest_scan(conn: sqlite3.Connection) -> dict | None:
     result = json.loads(row[1])
     result["_scan_id"] = row[0]
     return result
+
+
+def update_scan(conn: sqlite3.Connection, scan_id: int, result: dict) -> None:
+    """Rewrite a stored scan (e.g. after a re-run of the fit-food pass)."""
+    ensure_tables(conn)
+    clean = {k: v for k, v in result.items() if k != "_scan_id"}
+    conn.execute("UPDATE claude_scans SET cost_usd=?, result_json=? WHERE id=?",
+                 ((clean.get("usage") or {}).get("cost_usd"), json.dumps(clean, ensure_ascii=False), scan_id))
+    conn.commit()
+
+
+def latest_fit_food_scan(conn: sqlite3.Connection, limit: int = 6) -> dict | None:
+    """The newest scan that ran fit food (it runs once a day, so the
+    afternoon scan usually has none)."""
+    ensure_tables(conn)
+    for scan_id, raw in conn.execute("SELECT id, result_json FROM claude_scans ORDER BY id DESC LIMIT ?", (limit,)):
+        result = json.loads(raw)
+        if result.get("fit_food"):
+            result["_scan_id"] = scan_id
+            return result
+    return None

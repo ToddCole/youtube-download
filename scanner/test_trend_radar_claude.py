@@ -460,7 +460,8 @@ class EndToEndMockedScanTests(ClaudeTestCase):
         return fake_client
 
     def _run(self, conn, fake_client, research=False, **kwargs):
-        env = {"ANTHROPIC_API_KEY": "test-key", "MFO_WEB_RESEARCH": "1" if research else "0"}
+        # The fit-food pass has its own tests (test_fit_food.py); keep these about the news scan.
+        env = {"ANTHROPIC_API_KEY": "test-key", "MFO_WEB_RESEARCH": "1" if research else "0", "MFO_FIT_FOOD": "0"}
         with mock.patch.dict(os.environ, env), \
              mock.patch("trend_radar.claude_scan.build_client", return_value=fake_client):
             from trend_radar.claude_scan import run_claude_scan

@@ -689,7 +689,7 @@ async function refreshToday() {
 let claudeScanPoll = null;
 
 async function runClaudeScanNow() {
-  if (!confirm("Run a Claude scan now? It uses API credit (about US$0.40) and sends the phone digest.")) return;
+  if (!confirm("Run a Claude scan now? It uses API credit (about US$1–2) and sends the phone digest.")) return;
   hideEditorialError();
   try {
     const res = await fetch("/api/editorial/claude-scan/run", { method: "POST" });
@@ -802,6 +802,8 @@ function renderToday() {
     `;
     list.appendChild(card);
   });
+  renderFitFood(todayBoard?.fit_food);
+  renderEvergreen(todayBoard?.evergreen, todayBoard?.trend_scan?.scan_id);
   renderEmerging(todayBoard?.emerging_demand);
   const watch = meta?.watchlist || [];
   const watchEl = document.getElementById("today-watchlist");
@@ -829,6 +831,92 @@ function renderSeo(seo) {
     <div><dt>Search demand</dt><dd>${kws ? `<ul class="evidence-list">${kws}</ul>` : "No queries"}</dd></div>
     ${gsc ? `<div><dt>MFO in Google now</dt><dd><ul class="evidence-list">${gsc}</ul></dd></div>` : ""}
   `;
+}
+
+const MFO_ROOT = "https://mensfitnessonline.com.au";
+
+function linkOrNone(url, text) {
+  return url ? `<a href="${escapeAttr(url)}" target="_blank" rel="noopener">${escapeHtml(text || url)}</a>` : "";
+}
+
+function renderFitFood(fitFood) {
+  const panel = document.getElementById("fit-food-panel");
+  if (!panel) return;
+  const items = fitFood?.items || [];
+  panel.classList.toggle("hidden", !fitFood);
+  if (!fitFood) return;
+  const c = fitFood.comparison;
+  const cmp = c ? ` · both found ${c.both}, scanner only ${c.scanner}, web only ${c.web_only}` : "";
+  const cost = fitFood.cost_usd != null ? ` · US$${Number(fitFood.cost_usd).toFixed(2)}` : "";
+  document.getElementById("fit-food-summary").textContent =
+    `🥗 Fit food (${items.length}) · ${shortDate(fitFood.generated_at)}${cost}${cmp}`;
+  const list = document.getElementById("fit-food-list");
+  list.replaceChildren();
+  if (!items.length) {
+    list.textContent = fitFood.summary || "Nothing strong enough today.";
+    return;
+  }
+  items.forEach((p) => {
+    const card = document.createElement("article");
+    card.className = "recommendation-card";
+    const source = p.original_source_url;
+    card.innerHTML = `
+      <div class="lead-meta-row">
+        <span class="source-pill">${escapeHtml(p.label)}</span>
+        <span class="rating-pill rating-${(p.fit_score || 0) >= 8 ? "high" : (p.fit_score || 0) >= 6 ? "medium" : "low"}">${escapeHtml(String(p.fit_score ?? "?"))}/10 fit</span>
+        <span>${escapeHtml(p.format || "")}</span>
+        ${p.seo ? `<span class="seo-pill seo-${escapeAttr(p.seo.verdict)}">${escapeHtml(p.seo.label)}</span>` : ""}
+      </div>
+      <h3>${escapeHtml(p.headline || "")}</h3>
+      <dl class="recommendation-grid">
+        <div><dt>Why care</dt><dd>${escapeHtml(p.why_care || "")}</dd></div>
+        <div><dt>When</dt><dd>${escapeHtml(p.first_published || "")}</dd></div>
+        <div><dt>Facts</dt><dd>${escapeHtml(p.facts || "")}</dd></div>
+        <div><dt>Source</dt><dd>${linkOrNone(source) || "None verified"} <span class="small-muted">(${p.original_source_opened ? "opened" : "not opened"})</span>${p.other_outlet_url ? ` · also ${linkOrNone(p.other_outlet_url)}` : ""}</dd></div>
+        ${p.update_url ? `<div><dt>Page to update</dt><dd>${linkOrNone(p.update_url, p.update_url.replace(MFO_ROOT, ""))}</dd></div>` : ""}
+        <div><dt>Search</dt><dd>${escapeHtml(p.search_term || "")}${p.demand_note ? ` · ${escapeHtml(p.demand_note)}` : ""}</dd></div>
+        <div><dt>Risk</dt><dd>${escapeHtml(p.risk || "")}</dd></div>
+      </dl>
+      <div class="lead-actions">${voteButtons(fitFood.scan_id, p.rank, p.vote)}</div>
+    `;
+    list.appendChild(card);
+  });
+}
+
+function renderEvergreen(ideas, scanId) {
+  const panel = document.getElementById("evergreen-panel");
+  if (!panel) return;
+  ideas = ideas || [];
+  panel.classList.toggle("hidden", !ideas.length);
+  document.getElementById("evergreen-summary").textContent = `🌲 Evergreen (${ideas.length})`;
+  const list = document.getElementById("evergreen-list");
+  list.replaceChildren();
+  ideas.forEach((idea) => {
+    const card = document.createElement("article");
+    card.className = "recommendation-card";
+    let body;
+    if (idea.kind === "refresh") {
+      const qs = (idea.queries || []).map((q) =>
+        `<li>"${escapeHtml(q.query)}": #${Number(q.position).toFixed(1)}, ${fmtNum(q.impressions)} impr (28 days)</li>`).join("");
+      body = `
+        <div><dt>Page</dt><dd>${linkOrNone(idea.url, (idea.url || "").replace(MFO_ROOT, ""))}</dd></div>
+        <div><dt>In Google</dt><dd><ul class="evidence-list">${qs}</ul></dd></div>
+        <div><dt>Do</dt><dd>Push it onto page 1: bring it up to date and answer what those searchers want.</dd></div>
+        ${(idea.rivals || []).length ? `<div><dt>Split ranking</dt><dd>${escapeHtml(idea.rivals.join(", "))} also rank. Link or merge them.</dd></div>` : ""}`;
+    } else {
+      body = `
+        ${idea.url ? `<div><dt>Expand page</dt><dd>${linkOrNone(idea.url, idea.url.replace(MFO_ROOT, ""))}</dd></div>` : ""}
+        <div><dt>Angle</dt><dd>${escapeHtml(idea.angle || "")}</dd></div>
+        ${idea.why_it_lasts ? `<div><dt>Why it lasts</dt><dd>${escapeHtml(idea.why_it_lasts)}</dd></div>` : ""}`;
+    }
+    card.innerHTML = `
+      <div class="lead-meta-row"><span class="source-pill">${idea.kind === "refresh" ? "Refresh" : "New angle"}</span></div>
+      <h3>${escapeHtml(idea.title || "")}</h3>
+      <dl class="recommendation-grid">${body}</dl>
+      <div class="lead-actions">${voteButtons(scanId, idea.rank, idea.vote)}</div>
+    `;
+    list.appendChild(card);
+  });
 }
 
 function renderEmerging(emerging) {

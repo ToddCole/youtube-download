@@ -67,6 +67,23 @@ def _path(url: str) -> str:
     return url.replace(MFO_PREFIX, "") or "/"
 
 
+# MFO runs a few translated pages (Dutch, Japanese, Portuguese...). They get
+# real impressions but aren't pages to refresh, so evergreen skips them. The
+# index has no language field: a CJK/kana title, a language-code slug
+# suffix, or two distinct non-English function words marks a page.
+_FOREIGN_SLUG = re.compile(r"-(ja|nl|pt|es|fr|ko|zh|br)/?$")
+_CJK = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")
+_FOREIGN_WORDS = {"en", "het", "van", "aan", "een", "dos", "das", "da", "para", "und", "der", "die", "das",
+                  "el", "los", "las", "les", "et", "des", "und", "mit", "voor", "o", "na", "é", "y"}
+
+
+def is_english(url: str | None, title: str | None) -> bool:
+    if _FOREIGN_SLUG.search(url or "") or _CJK.search(title or ""):
+        return False
+    words = set(re.findall(r"[^\W\d_]+", (title or "").lower()))
+    return len(words & _FOREIGN_WORDS) < 2
+
+
 # --- Sources ---------------------------------------------------------------
 
 def find_refreshes(rows: list[dict], pages: list[dict], exclude: set[str], now: datetime) -> list[dict]:
@@ -94,6 +111,8 @@ def find_refreshes(rows: list[dict], pages: list[dict], exclude: set[str], now: 
         page = by_url.get(key) or {}
         impressions = sum(r.get("impressions") or 0 for r in qrows)
         if key in exclude or impressions < MIN_PAGE_IMPRESSIONS:
+            continue
+        if not is_english(url, page.get("title")):
             continue
         if (page.get("modified") or "") >= edited_cutoff:
             continue

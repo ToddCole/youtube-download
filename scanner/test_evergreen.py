@@ -120,3 +120,15 @@ class DigestTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_translated_pages_are_not_refresh_ideas():
+    from evergreen import is_english
+
+    assert not is_english("https://mensfitnessonline.com.au/backyard-ultra-wk-2026-belgie-nederland/",
+                          "WK backyard ultra 2026: België en Nederland aan de start")
+    assert not is_english("https://mensfitnessonline.com.au/backyard-ultra-towa-ja/", "バックヤードウルトラとは？")
+    assert not is_english("https://mensfitnessonline.com.au/a-batalha-dos-100/", "A Batalha dos 100: o que é")
+    assert is_english("https://mensfitnessonline.com.au/abdul-el-sayed-workout/", "Abdul El-Sayed workout: how much he benches")
+    assert is_english("https://mensfitnessonline.com.au/alex-de-minaur-diet/", "Alex de Minaur's diet and training")
+    assert is_english("https://mensfitnessonline.com.au/are-fitness-trackers-worth-it/", "Are Fitness Trackers Worth It?")

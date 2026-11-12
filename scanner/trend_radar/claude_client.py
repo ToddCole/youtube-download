@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -35,7 +36,7 @@ class MissingApiKeyError(RuntimeError):
 # US$ per million tokens: (input, output, cache_read, cache_write_5m).
 # Source: claude-api skill model table (cached 2026-10-06).
 PRICES_PER_MTOK: dict[str, tuple[float, float, float, float]] = {
-    "claude-sonnet-5-5": (2.00, 10.00, 0.20, 2.50),
+    "claude-sonnet-5-5": (2.00, 10.00, 0.10, 2.50),
     "claude-sonnet-5": (2.00, 10.00, 0.20, 2.50),
     "claude-opus-5-5": (4.00, 20.00, 0.20, 5.00),
     "claude-haiku-5-5": (0.10, 0.50, 0.01, 0.125),
@@ -153,12 +154,15 @@ class SpendLedger:
                 f"(spent US${spent:.2f} today, next call could cost up to US${estimated_usd:.2f})"
             )
 
+    _lock = threading.Lock()  # parallel calls (fit-food modes) share one ledger file
+
     def add(self, usd: float) -> None:
-        data = self._load()
-        today = self._today()
-        data[today] = round(float(data.get(today, 0.0)) + usd, 6)
-        keep = sorted(data)[-60:]
-        self.path.write_text(json.dumps({k: data[k] for k in keep}, indent=2) + "\n", encoding="utf-8")
+        with self._lock:
+            data = self._load()
+            today = self._today()
+            data[today] = round(float(data.get(today, 0.0)) + usd, 6)
+            keep = sorted(data)[-60:]
+            self.path.write_text(json.dumps({k: data[k] for k in keep}, indent=2) + "\n", encoding="utf-8")
 
 
 def estimate_call_cost(model: str, system: str, user_content: str, max_tokens: int) -> float:
@@ -293,8 +297,11 @@ def call_web_research(
     blocks: list = []
     for _attempt in range(MAX_PAUSE_RESUMES + 1):
         started = time.monotonic()
+        # Top-level caching: the server-side search loop then caches after each
+        # round of results, so later iterations read the growing prefix from cache.
         with client.messages.stream(model=model, max_tokens=max_tokens, system=system,
-                                    messages=messages, tools=tools) as stream:
+                                    messages=messages, tools=tools,
+                                    cache_control={"type": "ephemeral"}) as stream:
             final = stream.get_final_message()
         cost = usage.record(final.usage, time.monotonic() - started)
         if ledger is not None:

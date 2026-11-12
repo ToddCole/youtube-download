@@ -111,3 +111,33 @@ class ClaudeScanOutput(BaseModel):
         default_factory=list,
         description="0 to 3 held items (old news, no fresh hook) where MFO could still publish a lasting explainer or guide.",
     )
+
+
+# --- Fit-food pass ------------------------------------------------------
+
+FitFoodFormat = Literal["news post", "explainer", "add to existing post"]
+
+
+class FitFoodPick(BaseModel):
+    headline: str = Field(description="Headline idea: plain, punchy, no clickbait.")
+    why_care: str = Field(description="One line: why a man who trains should care.")
+    first_published: str = Field(description="The date the story first came out (YYYY-MM-DD), not a re-run date.")
+    original_source_url: str | None = Field(
+        default=None,
+        description="The original source (paper, regulator notice, company statement), exactly as it appears in the research notes. Never guessed.",
+    )
+    original_source_opened: bool = Field(description="True only if the notes say the original source itself was opened and read.")
+    other_outlet_url: str | None = Field(default=None, description="One other outlet covering it, exactly as in the notes, if any.")
+    facts: str = Field(description="Study details (journal, year, type, n, who, how long, main result in numbers, funder) or the regulator facts.")
+    search_term: str = Field(description="The search a reader would type (lowercase, no quotes).")
+    demand_note: str | None = Field(default=None, description="Any search-demand evidence from the notes; otherwise leave empty.")
+    format: FitFoodFormat
+    update_url: str | None = Field(default=None, description="For 'add to existing post': the MFO URL, exactly as given. Never guessed.")
+    fit_score: int = Field(ge=1, le=10, description="How good a fit for MFO, out of 10.")
+    risk: str = Field(description="One line on any risk: thin evidence, industry-funded, a health claim needing care.")
+
+
+class FitFoodOutput(BaseModel):
+    summary: str = Field(description="One or two sentences on what this fit-food search found overall.")
+    picks: list[FitFoodPick] = Field(description="0 to 3 fit-food picks, best first. Never padded.")
+    left_out: list[str] = Field(default_factory=list, description="Short notes on stories considered and left out, and why.")

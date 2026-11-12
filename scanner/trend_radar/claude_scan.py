@@ -11,9 +11,10 @@ run_claude_scan() itself.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .claude_client import (
     SpendLedger,
@@ -57,6 +58,45 @@ def web_research_settings() -> tuple[bool, int]:
     return enabled and searches > 0, max(0, searches)
 
 
+def fit_food_enabled() -> bool:
+    from .claude_fit_food import BRIEF_PATH
+
+    return os.environ.get("MFO_FIT_FOOD", "1") != "0" and BRIEF_PATH.exists()
+
+
+def fit_food_ran_today(conn, now: datetime | None = None) -> bool:
+    """Fit food runs once per local day (the first scan of the day); later
+    scans that day skip it. A run whose scanner mode errored doesn't count."""
+    import json as _json
+
+    now = now or datetime.now(timezone.utc)
+    today = now.astimezone().date()
+    since = (now - timedelta(days=1)).isoformat(timespec="seconds").replace("+00:00", "Z")
+    try:
+        rows = conn.execute("SELECT generated_at, result_json FROM claude_scans WHERE generated_at >= ?", (since,)).fetchall()
+    except Exception:
+        return False
+    for generated_at, raw in rows:
+        try:
+            when = datetime.fromisoformat(generated_at.replace("Z", "+00:00")).astimezone().date()
+            scanner = ((_json.loads(raw).get("fit_food") or {}).get("scanner")) or {}
+        except (ValueError, AttributeError, TypeError):
+            continue
+        if when == today and scanner and not scanner.get("error"):
+            return True
+    return False
+
+
+def add_fit_food_cost(result: dict) -> None:
+    """Fit-food spend counts in the scan's total, and is shown separately."""
+    usage = result.setdefault("usage", {})
+    extra = sum(((m or {}).get("usage") or {}).get("cost_usd") or 0
+                for m in (result.get("fit_food") or {}).values() if isinstance(m, dict))
+    base = usage.get("cost_usd") or 0
+    usage["cost_usd"] = round(base - (usage.get("fit_food_cost_usd") or 0) + extra, 6)
+    usage["fit_food_cost_usd"] = round(extra, 6)
+
+
 def build_packet_report(evidence: list[EvidenceRecord]) -> dict:
     """The --dry-run-packet result: what would be sent to Claude,
     without ever calling the API."""
@@ -79,8 +119,22 @@ def _assign_refs(records: list[EvidenceRecord], prefix: str, refs: dict[str, str
         refs.setdefault(record.signal_id, f"{prefix}{index:03d}")
 
 
+_REF = re.compile(r"([SX])0*(\d+)")
+
+
 def _translate(ref_or_id: str, back: dict[str, str]) -> str:
-    return back.get(ref_or_id.strip(), ref_or_id)
+    """Short ref -> signal UUID. The model sometimes drops the zero padding
+    ("S75" for "S075"); that can only mean one record, so it's accepted
+    rather than discarded (it once cost two whole waves in one scan)."""
+    ref = ref_or_id.strip()
+    if ref in back:
+        return back[ref]
+    m = _REF.fullmatch(ref)
+    if m:
+        padded = f"{m.group(1)}{int(m.group(2)):03d}"
+        if padded in back:
+            return back[padded]
+    return ref_or_id
 
 
 def run_claude_scan(
@@ -97,7 +151,11 @@ def run_claude_scan(
     """editor_feedback: learning.build_feedback() text, appended to both
     passes so discovery and editorial lean toward what the editor uses."""
     feedback_suffix = f"\n\n{editor_feedback}" if editor_feedback else ""
-    evidence = build_evidence_packet(conn, lookback_days=lookback_days, max_signals=max_signals + 1)
+    from .claude_fit_food import news_source_filter
+
+    # The fit-food-only sources feed the fit-food pass, never the news scan's packet.
+    evidence = build_evidence_packet(conn, lookback_days=lookback_days, max_signals=max_signals + 1,
+                                     include_source=news_source_filter())
     truncated = len(evidence) > max_signals
     evidence = evidence[:max_signals]
 
@@ -210,9 +268,15 @@ def run_claude_scan(
         raise EditorialValidationError(f"editorial pass failed twice; last error: {last_error}")
 
     result = editorial.model_dump()
+    if fit_food_enabled() and not fit_food_ran_today(conn):
+        from .claude_fit_food import fit_food_packet, run_fit_food
+
+        result["fit_food"] = run_fit_food(client, model=resolved_model,
+                                          evidence=fit_food_packet(conn, lookback_days=lookback_days), ledger=ledger)
     result["generated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     result["model"] = resolved_model
     result["usage"] = usage.as_dict()
+    add_fit_food_cost(result)
     result["_validation_repairs"] = repairs
     result["_expansion_queries_executed"] = expansion_log
     result["_evidence_packet_size"] = len(evidence)

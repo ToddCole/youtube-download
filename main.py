@@ -1837,6 +1837,46 @@ def save_pick_vote(req: PickVoteRequest):
     return {"ok": True, "vote": req.vote}
 
 
+def _fit_food_board(votes: dict) -> dict | None:
+    import sqlite3 as _sqlite3
+
+    import editorial_today as _et
+    from seo_opportunity import load_scores
+    from trend_radar.claude_fit_food import compare, shown_picks
+    from trend_radar.scan_store import latest_fit_food_scan
+
+    if not _et.TREND_DB.exists():
+        return None
+    conn = _sqlite3.connect(_et.TREND_DB)
+    try:
+        scan = latest_fit_food_scan(conn)
+    finally:
+        conn.close()
+    if not scan:
+        return None
+    scan_id, fit_food = scan["_scan_id"], scan["fit_food"]
+    scores = load_scores(scan_id)
+    result = compare(fit_food)
+    return {
+        "scan_id": scan_id,
+        "generated_at": scan.get("generated_at"),
+        "cost_usd": (scan.get("usage") or {}).get("fit_food_cost_usd"),
+        "summary": (fit_food.get("scanner") or {}).get("summary"),
+        "comparison": {"both": len(result["both"]), "scanner": len(result["scanner_only"]),
+                       "web_only": len(result["web_only"])} if result else None,
+        "items": [{**pick, "label": label, "rank": rank, "seo": scores.get(rank), "vote": votes.get((scan_id, rank))}
+                  for label, rank, pick in shown_picks(fit_food)],
+    }
+
+
+def _evergreen_board(meta: dict | None, scores: dict, votes: dict) -> list[dict]:
+    from evergreen import load
+
+    if not meta:
+        return []
+    return [{**idea, "vote": votes.get((meta["scan_id"], idea.get("rank")))} for idea in load(meta["scan_id"])]
+
+
 @app.get("/api/editorial/today")
 def get_today_board():
     from seo_opportunity import load_emerging, load_scores
@@ -1850,6 +1890,8 @@ def get_today_board():
     return {
         "trend_scan": meta,
         "trend_leads": leads,
+        "fit_food": _fit_food_board(votes),
+        "evergreen": _evergreen_board(meta, scores, votes),
         "emerging_demand": load_emerging(),
         "decisions": get_decisions(),
     }

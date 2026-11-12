@@ -122,6 +122,43 @@ def cmd_claude_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_fit_food(args: argparse.Namespace) -> int:
+    """Re-run the fit-food pass for the latest scan and store it there."""
+    from .claude_client import SpendCapReached, SpendLedger, build_client, resolve_model
+    from .claude_fit_food import fit_food_packet, load_config, run_fit_food
+    from .claude_scan import add_fit_food_cost
+    from .scan_store import latest_scan, update_scan
+
+    config = load_config()
+    if args.no_compare:
+        config["compare"] = False
+    with db_module.connect(args.db) as conn:
+        scan = latest_scan(conn)
+        if not scan:
+            print("error: no Claude scan yet", file=sys.stderr)
+            return 1
+        evidence = fit_food_packet(conn, config)
+        model = resolve_model(args.model or scan.get("model"))
+        try:
+            fit_food = run_fit_food(build_client(), model=model, evidence=evidence, ledger=SpendLedger(), config=config)
+        except SpendCapReached as exc:
+            print(f"ERROR: spend cap: {exc}", file=sys.stderr)
+            return 3
+        scan["fit_food"] = fit_food
+        add_fit_food_cost(scan)
+        update_scan(conn, scan["_scan_id"], scan)
+    for mode in ("scanner", "web_only"):
+        m = fit_food.get(mode)
+        if not m:
+            continue
+        cost = (m.get("usage") or {}).get("cost_usd")
+        print(f"{mode}: {m.get('error') or str(len(m.get('picks') or [])) + ' pick(s)'} (US${cost}, {m.get('seconds')}s)")
+        for pick in m.get("picks") or []:
+            print(f"  {pick['fit_score']}/10 {pick['headline']}")
+    print(f"Saved to scan {scan['_scan_id']}")
+    return 0 if any(not (fit_food.get(m) or {}).get("error") for m in ("scanner", "web_only") if m in fit_food) else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="trend_radar", description="MFO Fitness Trend Radar (raw collection + Claude-powered editorial scan)")
     parser.add_argument("--db", type=Path, default=None, help="Path to the Trend Radar SQLite database (default: scanner/trend_radar.db)")
@@ -149,6 +186,11 @@ def build_parser() -> argparse.ArgumentParser:
     claude_p.add_argument("--no-spend-cap", action="store_true", help="Do not check/record the daily Claude spend ledger")
     claude_p.add_argument("--no-feedback", action="store_true", help="Do not show Claude the editor feedback (published posts, 👍/👎)")
     claude_p.set_defaults(func=cmd_claude_scan)
+
+    food_p = sub.add_parser("fit-food", help="Re-run the fit-food pass (fit_food_brief.md) for the latest scan")
+    food_p.add_argument("--model", default=None, help="Override the model (default: the latest scan's)")
+    food_p.add_argument("--no-compare", action="store_true", help="Skip the web-only comparison run")
+    food_p.set_defaults(func=cmd_fit_food)
 
     return parser
 

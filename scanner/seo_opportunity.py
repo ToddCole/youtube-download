@@ -388,6 +388,21 @@ def demand_for(conn, queries: list[str]) -> dict:
     }
 
 
+# Fit-food picks are scored like news picks, under ranks that never clash
+# with them: 201+ for the scanner-led search, 301+ for the web-only one.
+FIT_FOOD_RANK_BASE = {"scanner": 200, "web_only": 300}
+
+
+def fit_food_candidates(scan: dict) -> list[dict]:
+    out = []
+    for mode, base in FIT_FOOD_RANK_BASE.items():
+        for n, pick in enumerate(((scan.get("fit_food") or {}).get(mode) or {}).get("picks") or [], 1):
+            update = pick.get("update_url") if pick.get("format") == "add to existing post" else None
+            out.append({"rank": base + n, "search_queries": [pick.get("search_term") or pick.get("headline") or ""],
+                        "story_type": "update" if update else "new", "update_url": update})
+    return out
+
+
 def score_latest_scan(client: OpenSEOClient, ledger: CreditLedger, db_path: Path = TREND_DB) -> dict:
     from trend_radar.scan_store import latest_scan
 
@@ -398,7 +413,7 @@ def score_latest_scan(client: OpenSEOClient, ledger: CreditLedger, db_path: Path
         return {"scored": 0, "note": "no Claude scan yet"}
     scan_id = scan["_scan_id"]
     picks = []
-    for candidate in scan.get("candidates") or []:
+    for candidate in (scan.get("candidates") or []) + fit_food_candidates(scan):
         queries = []
         for q in candidate.get("search_queries") or []:
             q = normalise_query(q)

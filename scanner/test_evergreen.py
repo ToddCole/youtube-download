@@ -130,6 +130,8 @@ def test_translated_pages_are_not_refresh_ideas():
                           "WK backyard ultra 2026: België en Nederland aan de start")
     assert not is_english("https://mensfitnessonline.com.au/backyard-ultra-towa-ja/", "バックヤードウルトラとは？")
     assert not is_english("https://mensfitnessonline.com.au/a-batalha-dos-100/", "A Batalha dos 100: o que é")
+    assert not is_english("https://mensfitnessonline.com.au/100-physique-france/",
+                          "100 % Physique France : date de sortie, casting et Ngannou")
     assert is_english("https://mensfitnessonline.com.au/abdul-el-sayed-workout/", "Abdul El-Sayed workout: how much he benches")
     assert is_english("https://mensfitnessonline.com.au/alex-de-minaur-diet/", "Alex de Minaur's diet and training")
     assert is_english("https://mensfitnessonline.com.au/are-fitness-trackers-worth-it/", "Are Fitness Trackers Worth It?")

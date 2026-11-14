@@ -1,4 +1,5 @@
-"""One scheduled cycle: learn -> collect -> (Claude slot) scan -> SEO -> digest -> health.
+"""One scheduled cycle: learn -> collect -> trending -> (07:00) paid scan + SEO + digest,
+or with paid scans off the free Google side + digest -> health.
 
 Run by launchd every 3h (see com.mfo.editorial-cycle.plist). Safe to run by
 hand:  python3 run_cycle.py [--claude|--no-claude] [--no-alert]
@@ -29,8 +30,9 @@ SCANNER_DIR = Path(__file__).resolve().parent
 SCANNER_DB = SCANNER_DIR / "scanner.db"
 REPORTS = SCANNER_DIR / "reports"
 CLAUDE_OUTPUT = REPORTS / "trend-claude-latest.json"
-# Two Claude scans a day, so anything older than this means one was missed.
-STALE_HOURS = 20
+# One Claude scan a day (07:00 cycle), so anything older than this means
+# a day's scan was missed. 20h fired false alarms at 04:00 and 06:00.
+STALE_HOURS = 27
 # Local hours (Mac clock) at which the paid Claude scan runs. Must line up
 # with the launchd 3-hourly grid.
 CLAUDE_HOURS = {7}  # one paid scan a day (13 Nov 2026); the other cycles collect and learn only
@@ -93,9 +95,10 @@ def health_problems(steps: list[dict]) -> list[str]:
             detail = (step.get("stderr_tail") or "").splitlines()[-1:] or [""]
             problems.append(f"{step['step']} {step['status']}: {detail[0][:200]}")
     age = report_age_hours(CLAUDE_OUTPUT)
-    if age is None:
+    paid_on = os.environ.get("MFO_CLAUDE_SCAN") == "1"
+    if age is None and paid_on:
         problems.append("no Claude scan yet")
-    elif age > STALE_HOURS and os.environ.get("MFO_CLAUDE_SCAN") == "1":
+    elif age is not None and age > STALE_HOURS and paid_on:
         problems.append(f"Claude scan stale ({age:.0f}h old)")
     try:
         with urlopen(DESK_URL, timeout=5) as response:
@@ -128,6 +131,16 @@ def send_alert(title: str, body: str, priority: str = "default") -> bool:
     except Exception as exc:  # noqa: BLE001
         print(f"WARNING: ntfy alert failed: {exc.__class__.__name__}: {getattr(exc, 'reason', exc)}", file=sys.stderr)
         return False
+
+
+def free_slot(flag: bool | None) -> bool:
+    """The daily slot when paid scans are off (or skipped with --no-claude
+    at that hour): the free Google side and digest run instead."""
+    if flag is True:
+        return False
+    if flag is None and os.environ.get("MFO_CLAUDE_SCAN") == "1":
+        return False
+    return datetime.now().hour in CLAUDE_HOURS
 
 
 def claude_enabled(flag: bool | None) -> bool:
@@ -168,6 +181,15 @@ def run_cycle(with_claude: bool | None, alert: bool) -> int:
             learn_args = [py, "learning.py", "--poll"] + (["--refresh-index"] if claude_slot else [])
             steps.append(run_step("learn", learn_args, 600))
             steps.append(run_step("trend_collect", [py, "-m", "trend_radar", "collect"], 900))
+            # Free: Google Trends / Wikipedia / Netflix matched to MFO, every cycle
+            # (Google's feed shows ~10 searches at a time; the digest pools 24h).
+            steps.append(run_step("trending", [py, "trending.py"], 300))
+            if free_slot(with_claude):
+                # Paid scans off: the free Google side and the digest still run daily.
+                if os.environ.get("OPENSEO_API_KEY"):
+                    steps.append(run_step("seo_free", [py, "seo_opportunity.py", "--free"], 600))
+                if alert and (os.environ.get("NTFY_TOPIC") or mailer.configured()):
+                    steps.append(run_step("digest", [py, "digest.py", "--free"], 60))
             if claude_slot:
                 started = time.time()
                 step = run_step(

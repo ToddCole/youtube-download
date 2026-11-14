@@ -27,7 +27,7 @@ import re
 import sqlite3
 import sys
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from itertools import zip_longest
 from pathlib import Path
 
@@ -75,11 +75,14 @@ def _path(url: str) -> str:
 _FOREIGN_SLUG = re.compile(r"-(ja|nl|pt|es|fr|ko|zh|br)/?$")
 _CJK = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")
 _FOREIGN_WORDS = {"en", "het", "van", "aan", "een", "dos", "das", "da", "para", "und", "der", "die", "das",
-                  "el", "los", "las", "les", "et", "des", "und", "mit", "voor", "o", "na", "é", "y"}
+                  "el", "los", "las", "les", "et", "des", "und", "mit", "voor", "o", "na", "é", "y",
+                  "de", "du", "sortie", "casting"}
 
 
 def is_english(url: str | None, title: str | None) -> bool:
     if _FOREIGN_SLUG.search(url or "") or _CJK.search(title or ""):
+        return False
+    if " : " in (title or ""):  # French typography: space before a colon
         return False
     words = set(re.findall(r"[^\W\d_]+", (title or "").lower()))
     return len(words & _FOREIGN_WORDS) < 2
@@ -169,6 +172,28 @@ def recent_keys(conn: sqlite3.Connection, now: datetime, scan_id) -> set[str]:
            ON f.scan_id = e.scan_id AND f.rank = e.rank
            WHERE f.vote = 'down' AND e.created_at >= ?""", (down_since,))}
     return keys
+
+
+def free_scan(day: date | None = None) -> dict:
+    """A stand-in "scan" for days without a paid Claude scan, so the free
+    Google refreshes still get picked, stored, voted on and sent. Its id
+    (9YYYYMMDD) can't clash with real scan ids and keeps vote tags parseable."""
+    day = day or date.today()
+    return {"_scan_id": int(f"9{day:%Y%m%d}"), "_free": True, "candidates": [], "evergreen_angles": [],
+            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+
+def latest_scan_id(db_path: Path = TREND_DB):
+    """The scan (paid or free) with the most recently stored ideas."""
+    if not db_path.exists():
+        return None
+    conn = sqlite3.connect(db_path)
+    try:
+        ensure_tables(conn)
+        row = conn.execute("SELECT scan_id FROM evergreen_ideas ORDER BY created_at DESC, scan_id DESC LIMIT 1").fetchone()
+    finally:
+        conn.close()
+    return row[0] if row else None
 
 
 def load(scan_id, db_path: Path = TREND_DB) -> list[dict]:

@@ -1,18 +1,25 @@
 # Handover: MFO Editorial Desk scanner
 
-Last updated 13 Nov 2026. Branch: `feature/mfo-trend-radar-claude`.
+Last updated 14 Nov 2026. Branch: `feature/mfo-trend-radar-claude`.
 
-**Status: on a one-week value trial, 13–20 Nov 2026.** The editor judged
-the paid scans poor value on 12–13 Nov: mostly repeats and unchecked picks,
-while the useful items came from free Google data. The fixes below shipped
-on 13 Nov. The test: if the scanner doesn't give at least one story a day
-the editor would publish, turn off the paid Claude scans
-(`MFO_CLAUDE_SCAN=0`, or drop the hour from `CLAUDE_HOURS` in
-`run_cycle.py`) and keep the free Google side.
+**Status: paid Claude scans OFF since 14 Nov 2026** (`MFO_CLAUDE_SCAN=0`
+in `.env`; set it to `1` to resume). The value trial ended after two days:
+$3.50 spent for one possible update and no new stories, while every clear
+win came from free Google data. The desk now runs on free sources only:
+
+- **Every cycle:** `trending.py` checks Google Trends AU (RSS), Wikipedia
+  AU page-view spikes and the Netflix AU Top 10, and keeps an item only when
+  it matches an MFO page or topic. Board and digest pool the last 24h.
+- **07:05 cycle:** `seo_opportunity.py --free` (rising searches + Google
+  refreshes) and `digest.py --free`. Free days use stand-in scan ids
+  `9YYYYMMDD` (`evergreen.free_scan()`), so votes still work.
+- The "Scan now" button on the desk still runs a **paid** scan.
+
+The trial history below is kept for reference.
 
 ## Where it stands
 
-184 tests pass: from `scanner/`, run `python3 -m pytest -q`.
+198 tests pass: from `scanner/`, run `python3 -m pytest -q`.
 
 Pipeline: learn -> collect -> Claude scan -> SEO -> digest (phone via ntfy
 and email). launchd runs `com.mfo.editorial-cycle` every 3 hours at :05.

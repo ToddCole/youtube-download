@@ -521,6 +521,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="connection test only (no credits)")
     parser.add_argument("--no-emerging", action="store_true")
+    parser.add_argument("--free", action="store_true",
+                        help="no paid scan today: rising searches and Google refreshes only")
     args = parser.parse_args()
     try:
         client = OpenSEOClient()
@@ -528,11 +530,12 @@ def main() -> int:
         if args.check:
             print(f"OpenSEO OK: {client.credits()} credits remaining")
             return 0
-        ledger = CreditLedger()
-        result = score_latest_scan(client, ledger)
-        print(f"SEO scored {result.get('scored', 0)} pick(s), {result.get('keywords', 0)} keyword(s); credits used today {ledger.used_today()}/{ledger.daily_cap}")
-        for error in result.get("errors") or []:
-            print(f"WARNING: {error}", file=sys.stderr)
+        if not args.free:
+            ledger = CreditLedger()
+            result = score_latest_scan(client, ledger)
+            print(f"SEO scored {result.get('scored', 0)} pick(s), {result.get('keywords', 0)} keyword(s); credits used today {ledger.used_today()}/{ledger.daily_cap}")
+            for error in result.get("errors") or []:
+                print(f"WARNING: {error}", file=sys.stderr)
         if not args.no_emerging:
             rows = emerging_demand(client)
             print(f"Emerging demand: {len(rows)} new quer(ies)")
@@ -540,7 +543,7 @@ def main() -> int:
             import evergreen
             from editorial_today import latest_trend_scan
 
-            scan = latest_trend_scan(TREND_DB)
+            scan = evergreen.free_scan() if args.free else latest_trend_scan(TREND_DB)
             if scan:
                 ideas = evergreen.compute(scan, evergreen.striking_rows(client), load_mfo_pages())
                 print(f"Evergreen: {len(ideas)} idea(s) for scan {scan.get('_scan_id')}")

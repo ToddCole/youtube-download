@@ -276,10 +276,47 @@ def rising_messages(emerging: dict | None, sent: list[dict]) -> list[dict]:
     return out
 
 
+TRENDING_MAX = 4
+TRENDING_TOPIC_ONLY_MAX = 2  # "fits a topic" items are weaker than "MFO has a page for it"
+_TRENDING_SOURCE = {"google": "Google Trends AU", "wikipedia": "Wikipedia AU", "netflix": "Netflix AU Top 10"}
+
+
+def trending_messages(trending: dict | None, sent: list[dict]) -> list[dict]:
+    """🔥 what Australians are searching or watching right now that lines up
+    with MFO: an existing page to update first, then topics MFO covers."""
+    import trending as trending_mod
+
+    out, topic_only = [], 0
+    for it in sorted(trending_mod.all_items(trending), key=lambda i: i.get("mfo_page") is None):
+        page = it.get("mfo_page")
+        if not page and topic_only >= TRENDING_TOPIC_ONLY_MAX:
+            continue
+        log_item = sent_log.item("trending", it.get("term"), page["url"] if page else it.get("url"))
+        if is_repeat(log_item, sent):
+            continue
+        lines = [f"{_TRENDING_SOURCE.get(it.get('source'), it.get('source'))}: {it.get('traffic') or 'trending'}."]
+        if it.get("detail"):
+            lines.append(_clip(it["detail"], 160))
+        if page:
+            lines.append(f"🔵 MFO has it: {page['url'].replace(sent_log.MFO_PREFIX, '')}. Update it while people are searching.")
+        else:
+            lines.append(f"Fits: {', '.join(it.get('topics') or [])}. Worth a piece if there's an MFO angle.")
+        topic_only += not page
+        out.append({
+            "title": f"🔥 Trending: {_clip(it.get('term'), 70)}", "message": "\n".join(lines), "priority": 3,
+            "tags": ["fire"], "click": page["url"] if page else it.get("url"), "actions": [], "_item": log_item,
+        })
+        if len(out) >= TRENDING_MAX:
+            break
+    return out
+
+
 def build_messages(scan: dict, scores: dict[int, dict], emerging: dict | None, now: datetime | None = None,
-                   evergreen: list[dict] | None = None, sent: list[dict] | None = None) -> list[dict]:
+                   evergreen: list[dict] | None = None, sent: list[dict] | None = None,
+                   trending: dict | None = None) -> list[dict]:
     """Every notification for this scan. sent: sent_log.recent() -- items
-    already sent in the last week are left out."""
+    already sent in the last week are left out. A free scan (no paid Claude
+    scan today) has no news picks and sends no "nothing new" note."""
     now = now or datetime.now()
     sent = sent or []
     slot = "Morning" if now.hour < 12 else "Afternoon"
@@ -289,15 +326,22 @@ def build_messages(scan: dict, scores: dict[int, dict], emerging: dict | None, n
     if picks:
         messages = [{**pick_message(c, scores.get(c.get("rank")), n, len(picks), slot, scan_id), "_item": news_item(c)}
                     for n, c in enumerate(picks, 1)]
+    elif scan.get("_free"):
+        messages = []
     else:
         messages = [{
             "title": f"MFO {slot}: nothing new strong enough today",
             "message": _clip(scan.get("corpus_summary") or "No pick cleared the bar this scan.", 400),
             "priority": 2, "tags": ["zzz"], "actions": [],
         }]
+    # Order: news picks, trending searches MFO already has a page for, Google
+    # refreshes, fit food, rising searches, then trending topics without a page.
+    trend = trending_messages(trending, sent)
+    messages += [m for m in trend if m["_item"]["urls"] and m["_item"]["urls"][0].startswith(sent_log.MFO_PREFIX)]
     messages += [{**evergreen_message(idea, scan_id), "_item": evergreen_item(idea)} for idea in evergreen]
     messages += fit_food_messages(scan, scores, sent)
     messages += rising_messages(emerging, sent)
+    messages += [m for m in trend if not (m["_item"]["urls"] and m["_item"]["urls"][0].startswith(sent_log.MFO_PREFIX))]
     for m in messages:
         if not m.get("click"):
             m.pop("click", None)
@@ -364,17 +408,17 @@ def _mark_sent(scan_id) -> None:
     STATE_FILE.write_text(json.dumps({"last_scan_id": scan_id, "sent_at": datetime.now().isoformat()}), encoding="utf-8")
 
 
-def send_digest(force: bool = False, dry_run: bool = False, db_path: Path = TREND_DB) -> str:
+def send_digest(force: bool = False, dry_run: bool = False, db_path: Path = TREND_DB, free: bool = False) -> str:
+    import evergreen
+    import trending
     from editorial_today import latest_trend_scan
     from seo_opportunity import load_emerging, load_scores
 
-    scan = latest_trend_scan(db_path)
+    scan = evergreen.free_scan() if free else latest_trend_scan(db_path)
     if not scan:
         return "no scan"
     if not force and not dry_run and _already_sent(scan.get("_scan_id")):
         return "already sent"
-    import evergreen
-
     import sqlite3
 
     conn = sqlite3.connect(db_path)
@@ -383,8 +427,13 @@ def send_digest(force: bool = False, dry_run: bool = False, db_path: Path = TREN
     finally:
         conn.close()
     messages = build_messages(scan, load_scores(scan["_scan_id"], db_path), load_emerging(db_path),
-                              evergreen=evergreen.load(scan["_scan_id"], db_path), sent=sent)
+                              evergreen=evergreen.load(scan["_scan_id"], db_path), sent=sent,
+                              trending=trending.load_recent(db_path=db_path))
     items = [m.pop("_item") for m in messages if "_item" in m]
+    if not messages:
+        if not dry_run:
+            _mark_sent(scan.get("_scan_id"))
+        return "nothing to send"
     if dry_run:
         return "\n\n".join(
             f"[p{m['priority']}] {m['title']}\n{m['message']}\n  tap -> {m.get('click', '-')}\n"
@@ -444,10 +493,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dry-run", action="store_true", help="print, don't push")
     parser.add_argument("--force", action="store_true", help="send even if this scan was already sent")
+    parser.add_argument("--free", action="store_true", help="no paid scan today: Google and trending items only")
     args = parser.parse_args()
-    result = send_digest(force=args.force, dry_run=args.dry_run)
+    result = send_digest(force=args.force, dry_run=args.dry_run, free=args.free)
     print(result)
-    return 0 if result in {"sent", "already sent"} or result.startswith("partly") or args.dry_run else 1
+    return 0 if result in {"sent", "already sent", "nothing to send"} or result.startswith("partly") or args.dry_run else 1
 
 
 if __name__ == "__main__":

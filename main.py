@@ -1869,12 +1869,14 @@ def _fit_food_board(votes: dict) -> dict | None:
     }
 
 
-def _evergreen_board(meta: dict | None, scores: dict, votes: dict) -> list[dict]:
-    from evergreen import load
+def _evergreen_board(votes: dict) -> tuple[int | None, list[dict]]:
+    """The latest ideas, from a paid scan or a free (Google-only) day."""
+    from evergreen import latest_scan_id, load
 
-    if not meta:
-        return []
-    return [{**idea, "vote": votes.get((meta["scan_id"], idea.get("rank")))} for idea in load(meta["scan_id"])]
+    scan_id = latest_scan_id()
+    if scan_id is None:
+        return None, []
+    return scan_id, [{**idea, "vote": votes.get((scan_id, idea.get("rank")))} for idea in load(scan_id)]
 
 
 @app.get("/api/editorial/today")
@@ -1887,12 +1889,19 @@ def get_today_board():
     for lead in leads:
         lead["seo"] = scores.get(lead.get("rank"))
         lead["vote"] = votes.get((meta["scan_id"], lead.get("rank"))) if meta else None
+    import trending
+
+    evergreen_scan_id, evergreen = _evergreen_board(votes)
     return {
         "trend_scan": meta,
         "trend_leads": leads,
-        "fit_food": _fit_food_board(votes),
-        "evergreen": _evergreen_board(meta, scores, votes),
+        "paid_scan_on": os.environ.get("MFO_CLAUDE_SCAN") == "1",
+        # Fit food comes only from the paid scan: hide the old one when that's off.
+        "fit_food": _fit_food_board(votes) if os.environ.get("MFO_CLAUDE_SCAN") == "1" else None,
+        "evergreen": evergreen,
+        "evergreen_scan_id": evergreen_scan_id,
         "emerging_demand": load_emerging(),
+        "trending": trending.load_recent(),
         "decisions": get_decisions(),
     }
 

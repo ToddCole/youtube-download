@@ -755,14 +755,19 @@ function renderToday() {
   const list = document.getElementById("today-list");
   const metaEl = document.getElementById("today-meta");
   if (!list) return;
-  const meta = todayBoard?.trend_scan;
-  const leads = todayBoard?.trend_leads || [];
-  if (meta) {
+  const paidOff = todayBoard && todayBoard.paid_scan_on === false;
+  const meta = paidOff ? null : todayBoard?.trend_scan;
+  const leads = paidOff ? [] : todayBoard?.trend_leads || [];
+  if (paidOff) {
+    const last = todayBoard?.trend_scan;
+    metaEl.textContent = `Paid Claude news scan is off${last ? ` (last run ${shortDate(last.generated_at)})` : ""}. The free sections below update every day.`;
+  } else if (meta) {
     const cost = meta.cost_usd != null ? ` · US$${Number(meta.cost_usd).toFixed(2)}` : "";
     metaEl.textContent = `Claude news scan ${shortDate(meta.generated_at)} · ${meta.packet_size || "?"} signals read${cost}`;
   }
   list.className = leads.length ? "recommendations-list" : "recommendations-list empty-state";
   list.replaceChildren();
+  list.classList.toggle("hidden", paidOff);
   if (!leads.length) {
     list.textContent = meta
       ? `Nothing strong enough to pick this scan. ${meta.corpus_summary || ""}`.trim()
@@ -803,7 +808,8 @@ function renderToday() {
     list.appendChild(card);
   });
   renderFitFood(todayBoard?.fit_food);
-  renderEvergreen(todayBoard?.evergreen, todayBoard?.trend_scan?.scan_id);
+  renderTrending(todayBoard?.trending);
+  renderEvergreen(todayBoard?.evergreen, todayBoard?.evergreen_scan_id);
   renderEmerging(todayBoard?.emerging_demand);
   const watch = meta?.watchlist || [];
   const watchEl = document.getElementById("today-watchlist");
@@ -917,6 +923,26 @@ function renderEvergreen(ideas, scanId) {
     `;
     list.appendChild(card);
   });
+}
+
+const TRENDING_SOURCE = { google: "Google Trends AU", wikipedia: "Wikipedia AU", netflix: "Netflix AU Top 10" };
+
+function renderTrending(trending) {
+  const panel = document.getElementById("trending-panel");
+  if (!panel) return;
+  const items = ["google", "wikipedia", "netflix"].flatMap((k) => trending?.[k] || []);
+  panel.classList.toggle("hidden", !trending);
+  document.getElementById("trending-summary").textContent =
+    `🔥 Trending now (${items.length})${trending ? ` · ${shortDate(trending.computed_at)}` : ""}`;
+  document.getElementById("trending-list").innerHTML = items.length
+    ? `<ul class="evidence-list">${items.map((it) => {
+        const page = it.mfo_page;
+        const doThis = page
+          ? `🔵 MFO has it: ${linkOrNone(page.url, page.url.replace(MFO_ROOT, ""))}. Update it while people are searching.`
+          : `Fits: ${escapeHtml((it.topics || []).join(", "))}`;
+        return `<li><strong>${linkOrNone(it.url, it.term)}</strong> · ${escapeHtml(TRENDING_SOURCE[it.source] || it.source)}, ${escapeHtml(it.traffic || "")}${it.detail ? ` · <span class="small-muted">${escapeHtml(it.detail)}</span>` : ""}<br>${doThis}</li>`;
+      }).join("")}</ul>`
+    : `<p class="small-muted">Nothing trending in Australia matches MFO right now.</p>`;
 }
 
 function renderEmerging(emerging) {
